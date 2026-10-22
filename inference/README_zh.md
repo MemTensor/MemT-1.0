@@ -73,7 +73,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling 后端 | Triton / PyTorch | Triton / PyTorch |
 | 保留流式会话 KV | 关闭 | 开启 |
 
-两个脚本均采用 eager 执行，并显式设置记忆和 KV 预算，用于单节点 BF16 服务。这些值是部署示例，不是固定的并行度要求；额外的 SGLang 原生参数可以覆盖脚本值，但仍须通过下述启动检查。
+两个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。默认启用每次 forward 内跨层复用的 metadata 缓存；slot read 和 prefill/decode CUDA Graph 按下述环境变量显式开启。CUDA Graph 未命中兼容形状时回退 eager。这些值是部署示例，不是固定的并行度要求；额外的 SGLang 原生参数可以覆盖脚本值，但仍须通过下述启动检查。
 
 ### Launcher 参数
 
@@ -98,7 +98,7 @@ python -m memt_sglang.launch --model-path /models/MemT-1.0-Nano --dry-run
 
 Dry-run 不校验 SGLang 参数。正常启动会在 SGLang 完成参数解析和后处理后，对实际生成的 `ServerArgs` 进行校验，通过后才启动服务。配置校验不会执行 checkpoint 中的 Python 模型代码。
 
-服务仅支持单节点 eager 执行和未量化的 BF16 safetensors 权重。必须关闭 chunked prefill（`--chunked-prefill-size -1`）、radix cache、overlap scheduling，以及 prefill 和 decode 两阶段的 CUDA graph。`max_prefill_tokens` 不得小于 checkpoint 的 `memt.chunk_tokens`。
+服务使用单节点未量化的 BF16 safetensors 权重。必须关闭 chunked prefill（`--chunked-prefill-size -1`）和 radix cache；兼容的 prefill/decode shape 可以使用 CUDA Graph，不兼容时使用 eager 路径。`max_prefill_tokens` 不得小于 checkpoint 的 `memt.chunk_tokens`。
 
 Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size == dp_size`，使 attention TP 为 1。Launcher 拒绝 `trust_remote_code`、`--config` 配置合并和 request header overrides。其他不支持的执行模式见 [validation.py](memt_sglang/validation.py)。
 
@@ -112,6 +112,21 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_STATE_DIRECTORY` | 启动脚本的快照目录，默认 `./memt-state`。 |
 | `MEMT_API_KEY` | CLI 和示例读取的 API key，以 `Authorization: Bearer ...` 发送；该变量不配置服务端的 API key。 |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
+| `MEMT_EXPERIMENT_METADATA_CACHE` | 默认 `1`，在一次 forward 内跨记忆层复用 token/slot 元数据；设为 `0` 关闭。 |
+| `MEMT_EXPERIMENT_SLOT_READ` | 设为 `1` 启用按 slot 直接读取，默认 `0`。 |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Nano 可设为 `1` 启用 token 数精确匹配的 prefill graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_DECODE_GRAPH` | 设为 `1` 启用 decode graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_C4_CANONICAL_ORDER` | Flash 可选的原生 top-k 输出排序，默认 `0`；不改变所选元素集合。 |
+
+例如，启用 Nano 的四项优化：
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano
+```
+
+可用 `--cuda-graph-config` 指定需要捕获的 batch/token 形状。Flash 的实验配置启用 metadata、slot read 和 decode graph，prefill graph 保持关闭；历史严格 logits 对比未通过，不应视为已完成数值验收。
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 

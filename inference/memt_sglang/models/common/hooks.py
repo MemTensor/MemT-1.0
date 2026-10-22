@@ -2,6 +2,33 @@
 
 
 class MemoryHooks:
+    def setup_execution(self, *, dp_attention=False):
+        from memt_sglang.runtime.features import enabled
+
+        prefill, decode = enabled("PREFILL_GRAPH"), enabled("DECODE_GRAPH")
+        self.graph_enabled = prefill or decode
+        if not self.graph_enabled:
+            return lambda function: function
+        from sglang.srt.model_executor.runner_backend_utils.breakable_cuda_graph import (
+            eager_on_graph,
+        )
+
+        from memt_sglang.runtime.decode_graph import (
+            install_decode_query_guard,
+            install_dp_query_consensus,
+            install_logits_output_bridge,
+        )
+        from memt_sglang.runtime.prefill_graph import install_prefill_query_guard
+
+        install_logits_output_bridge()
+        if dp_attention:
+            install_dp_query_consensus()
+        if prefill:
+            install_prefill_query_guard(exact_tokens=not dp_attention)
+        if decode:
+            install_decode_query_guard()
+        return eager_on_graph(True)
+
     def forward(
         self, native_forward, input_ids, positions, forward_batch, *args, **kwargs
     ):

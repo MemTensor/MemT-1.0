@@ -10,6 +10,7 @@ from pathlib import Path
 
 from memt_sglang import SGLANG_REFERENCE_COMMIT, SGLANG_VERSION, require_sglang
 from memt_sglang._vendor.fla import __version__ as FLA_VERSION
+from memt_sglang.runtime.features import enabled, sync_graph_config
 from memt_sglang.validation import (
     validate_model_config,
     validate_runtime_config,
@@ -63,7 +64,8 @@ def prepare(argv):
         "--disable-radix-cache",
         "--disable-overlap-schedule",
         "--cuda-graph-config",
-        json.dumps({phase: {"backend": "disabled"} for phase in ("prefill", "decode")}),
+        json.dumps({phase: {"backend": "breakable" if enabled(phase.upper() + "_GRAPH")
+                            else "disabled"} for phase in ("prefill", "decode")}),
         "--json-model-override-args",
         json.dumps({"memt_runtime": runtime}),
         *rest,
@@ -197,6 +199,7 @@ def main(argv=None):
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
+    sync_graph_config(args)
     validate_server_args(
         args,
         identity["model"],

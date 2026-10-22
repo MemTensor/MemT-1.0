@@ -73,7 +73,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling backend | Triton / PyTorch | Triton / PyTorch |
 | Retained streaming sessions | Disabled | Enabled |
 
-Both scripts use eager execution and explicit memory/KV budgets for single-node BF16 serving. These values are examples, not fixed parallelism requirements; extra native SGLang arguments override script values subject to the startup checks below.
+Both scripts use explicit memory/KV budgets for single-node BF16 serving. Per-forward metadata caching across memory layers is enabled by default. Slot reads and prefill/decode CUDA Graph replay are enabled explicitly with the environment variables below; incompatible graph shapes fall back to eager execution. These values are examples, not fixed parallelism requirements; extra native SGLang arguments override script values subject to the startup checks below.
 
 ### Launcher arguments
 
@@ -98,7 +98,7 @@ python -m memt_sglang.launch --model-path /models/MemT-1.0-Nano --dry-run
 
 Dry-run does not validate SGLang arguments. Normal startup validates the actual `ServerArgs` returned by SGLang after parsing and post-processing, before launching the server. Configuration validation does not execute checkpoint Python model code.
 
-Serving requires single-node eager execution with unquantized BF16 safetensors. Chunked prefill is disabled (`--chunked-prefill-size -1`), and radix cache, overlap scheduling, and both prefill and decode CUDA graphs must remain disabled. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
+Serving requires single-node unquantized BF16 safetensors. Chunked prefill is disabled (`--chunked-prefill-size -1`) and radix cache remains disabled. Compatible prefill/decode shapes may use CUDA Graph replay; incompatible shapes use eager execution. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
 
 Nano requires DP attention to be disabled. Flash enables DP attention and requires `tp_size == dp_size`, giving attention TP1. The launcher rejects `trust_remote_code`, `--config` merging and request header overrides. Additional unsupported execution modes are listed in [validation.py](memt_sglang/validation.py).
 
@@ -112,6 +112,21 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_STATE_DIRECTORY` | Startup script snapshot directory; default `./memt-state`. |
 | `MEMT_API_KEY` | API key read by the CLI and supplied examples, sent as `Authorization: Bearer ...`. This does not configure the server's API key. |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | Must remain disabled; enabling it is rejected at startup. |
+| `MEMT_EXPERIMENT_METADATA_CACHE` | Defaults to `1`; reuse token/slot metadata across memory layers within one forward. Set to `0` to disable. |
+| `MEMT_EXPERIMENT_SLOT_READ` | Set to `1` to read state slots directly; defaults to `0`. |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Set to `1` for Nano prefill graphs with an exact token-count match; defaults to `0`. |
+| `MEMT_EXPERIMENT_DECODE_GRAPH` | Set to `1` for decode graphs; defaults to `0`. |
+| `MEMT_EXPERIMENT_C4_CANONICAL_ORDER` | Optional native Flash top-k output ordering; defaults to `0`. Preserves selected membership. |
+
+For example, enable the four Nano optimizations:
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano
+```
+
+Use `--cuda-graph-config` to select captured batch/token shapes. The experimental Flash configuration enables metadata caching, slot reads and decode graphs, with prefill graphs disabled. Its historical strict logits comparison did not pass; numerical qualification remains incomplete.
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 

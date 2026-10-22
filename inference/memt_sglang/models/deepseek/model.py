@@ -15,6 +15,9 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
     """Native backbone names plus the published MemT memory parameter names."""
 
     def __init__(self, config, quant_config=None, prefix=""):
+        from memt_sglang.runtime.c4_order import install
+
+        install("memt-flash", {"index_topk": getattr(config, "index_topk", 512)})
         self._memory_config = config.memory_config
         self._memory_loaded = False
         super().__init__(config, quant_config=quant_config, prefix=prefix)

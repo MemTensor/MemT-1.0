@@ -120,20 +120,6 @@ def validate_server_args(
     for name in DISALLOWED_SERVER_FLAGS:
         if getattr(args, name):
             raise ValueError(f"MemT does not support {name}")
-    graph = args.cuda_graph_config
-    for phase in ("prefill", "decode"):
-        item = (
-            graph.get(phase, {})
-            if isinstance(graph, Mapping)
-            else getattr(graph, phase, None)
-        )
-        backend = (
-            item.get("backend")
-            if isinstance(item, Mapping)
-            else getattr(item, "backend", None)
-        )
-        if backend != "disabled":
-            raise ValueError(f"MemT requires {phase} CUDA graphs disabled")
     for name, supported in MODEL_SERVER_VALUES[model].items():
         if getattr(args, name) not in supported:
             raise ValueError(f"{model} requires {name} in {supported!r}")
