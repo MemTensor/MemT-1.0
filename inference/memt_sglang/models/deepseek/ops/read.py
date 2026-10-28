@@ -29,3 +29,14 @@ def snapshot_read(query, states, lengths, scale, *, bf16_accumulator_output=Fals
         .reshape(count * width, heads, -1)
     )
     return result.index_select(0, index).unsqueeze(0)
+
+
+def packed_snapshot_read(query, states, lengths, scale):
+    """Skip identity padding/index operations for one-token decode samples."""
+    if all(length == 1 for length in lengths):
+        count, heads, dim = len(lengths), query.shape[2], query.shape[3]
+        q = query.reshape(count * heads, 1, dim)
+        state_matrix = states.reshape(count * heads, dim, states.shape[-1]).to(q.dtype)
+        result = torch.baddbmm(q.new_empty(()), q, state_matrix, beta=0, alpha=scale)
+        return result.reshape(1, count, heads, states.shape[-1])
+    return snapshot_read(query, states, lengths, scale, bf16_accumulator_output=True)

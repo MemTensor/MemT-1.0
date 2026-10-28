@@ -5,12 +5,13 @@ import triton
 
 from memt_sglang.models.qwen.ops._triton.read import BK_READ, BV_READ, _read_fwd_kernel
 from memt_sglang.models.qwen.ops.layout import ChunkPlan
+from memt_sglang.models.qwen.ops.query_plan import QueryPlan
 
 
 def memt_gdn2_read_fwd(
     q: torch.Tensor,
     snaps: torch.Tensor,
-    plan: ChunkPlan,
+    plan: ChunkPlan | QueryPlan,
     scale: float,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:

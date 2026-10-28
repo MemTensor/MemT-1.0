@@ -73,7 +73,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling backend | Triton / PyTorch | Triton / PyTorch |
 | Retained streaming sessions | Disabled | Enabled |
 
-Both scripts use eager execution and explicit memory/KV budgets for single-node BF16 serving. These values are examples, not fixed parallelism requirements; extra native SGLang arguments override script values subject to the startup checks below.
+Both scripts use explicit memory/KV budgets for single-node BF16 serving. Per-forward metadata caching across memory layers is enabled by default. Nano ordinary and slot readers share a bounded, CUDA-stream-keyed LRU cache of immutable query geometry across layers and forwards. This cache is independent of `MEMT_EXPERIMENT_METADATA_CACHE`, which controls token/slot metadata reuse within one forward; request IDs, live state-slot IDs, memory contents and layer parameters are not cached in query geometry. Slot reads and prefill/decode CUDA Graph replay require explicit opt-in; incompatible batches fall back to eager execution. These values are deployment examples; extra native SGLang arguments remain subject to startup validation.
 
 ### Launcher arguments
 
@@ -98,7 +98,7 @@ python -m memt_sglang.launch --model-path /models/MemT-1.0-Nano --dry-run
 
 Dry-run does not validate SGLang arguments. Normal startup validates the actual `ServerArgs` returned by SGLang after parsing and post-processing, before launching the server. Configuration validation does not execute checkpoint Python model code.
 
-Serving requires single-node eager execution with unquantized BF16 safetensors. Chunked prefill is disabled (`--chunked-prefill-size -1`), and radix cache, overlap scheduling, and both prefill and decode CUDA graphs must remain disabled. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
+Serving requires single-node unquantized BF16 safetensors. Chunked prefill (`--chunked-prefill-size -1`) and overlap are disabled by default; radix cache must remain disabled. Compatible prefill/decode shapes may use CUDA Graph replay; incompatible shapes use eager execution. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
 
 Nano requires DP attention to be disabled. Flash enables DP attention and requires `tp_size == dp_size`, giving attention TP1. The launcher rejects `trust_remote_code`, `--config` merging and request header overrides. Additional unsupported execution modes are listed in [validation.py](memt_sglang/validation.py).
 
@@ -112,8 +112,102 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_STATE_DIRECTORY` | Startup script snapshot directory; default `./memt-state`. |
 | `MEMT_API_KEY` | API key read by the CLI and supplied examples, sent as `Authorization: Bearer ...`. This does not configure the server's API key. |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | Must remain disabled; enabling it is rejected at startup. |
+| `MEMT_EXPERIMENT_METADATA_CACHE` | Defaults to `1`; reuse token/slot metadata across memory layers within one forward. Set to `0` to disable. |
+| `MEMT_EXPERIMENT_SLOT_READ` | Set to `1` to read state slots directly; defaults to `0`. |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Set to `1` to opt into prefill graphs; defaults to `0`. Nano supports native capture-gear padding while preserving valid-token counts and live request spans. Flash requires the explicit configuration and exact local-gear checks below. |
+| `MEMT_EXPERIMENT_DECODE_GRAPH` | Set to `1` for decode graphs; defaults to `0`. |
+| `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Independently enable native phase overlap with `1`; both default to `0`. Commit boundaries synchronize. |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Set to `1` and supply `--chunked-prefill-size` to chunk queries; the resolved per-rank budget must be ≥2048. Defaults to `0`. Complete commits remain one forward and may exceed this query budget. |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Idle-boundary wait in ms: `0` disables it (default), otherwise `(0, 10]`. Supports Nano TP2 or Flash TP=DP=EP4/8. |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release when either target is reached; defaults to 4 requests / 4096 input tokens when waiting is enabled. These are release thresholds, not batch limits. |
+
+For example, enable the Nano feature combination:
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano
+```
+
+Use `--cuda-graph-config` to select captured batch/token shapes. Flash supports explicit experimental prefill and decode graph requests on the pinned PyTorch 2.11.0 / SGLang 0.5.16 stack. The prefill experiment requires TP4 / DP4 / EP4, PP1, DP attention, A2A `none`, disabled overlap, unquantized BF16 weights and the pinned native compatibility checks. This is distinct from the TP8 script example above. Prefill capture gears default to `[512, 1024]` when requested; `[512, 1024, 4096]` must be selected explicitly. Prefill replay additionally requires all four ranks to have equal, nonzero original token counts, each rank's actual token count to match a captured local gear exactly, compatible metadata and agreement across ranks. Idle, uneven or unmatched batches fall back to eager execution. Both graph phases remain off by default; successful capture alone does not establish replay or numerical qualification. Dedicated GPU checks exercised local gears 512, 1024 and 4096 on all four ranks, with eager fallback for idle and uneven prefill batches. These checks do not establish batch invariance; see the validation results and limitations below.
+
+All MemT memory blocks execute eagerly, including during breakable graph replay. The eager/opt-in comparison is a feature-combination comparison: eager uses metadata cache `0`, slot reads `0` and both graphs off; the opt-in combination explicitly enables metadata cache, slot reads and both graphs. Nano’s immutable query-geometry LRU remains shared by ordinary and slot readers in both configurations. Flash shares its single-token reader fast path between ordinary and slot reads.
+
+Client concurrency, including c32, does not establish physical BS32 or per-rank token counts. Batch-shape-dependent numerical drift has been observed relative to single-request execution; graph/eager agreement for the same actual batch does not imply batch invariance. Neither BS32 nor deterministic communication guarantees identical logits across batch compositions.
+
+Overlap and query chunking are optional experimental capabilities for community use; both default to off and neither guarantees a performance improvement. Phase overlap is independently selectable. Query chunks change native KV prefill grouping while reading the same published memory state. Complete commits are never split: defer them behind an existing prefill, or admit a whole commit exceeding the query chunk budget into an empty prefill, subject to native KV/SWA capacity checks. With Flash DP attention, SGLang divides the CLI chunk budget by DP size; `execution.query_chunk_per_rank` reports the resolved value in the server identity.
+
+```bash
+MEMT_EXPERIMENT_DECODE_OVERLAP=1 MEMT_EXPERIMENT_QUERY_CHUNKS=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano --chunked-prefill-size 8192
+```
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
+
+### Validation setup and limits
+
+The evaluated Nano checkpoint is `MemT-2.0-35B-A3B_2610161130`; these numbers do not characterize the separately distributed MemT-1.0-Nano weights. Flash uses MemT-1.0-Flash. Measurements use B300 SXM6 AC GPUs, BF16 weights, PyTorch 2.11.0+cu130 and SGLang 0.5.16. Nano runs on two GPUs with TP2/DP1/EP1; Flash uses four GPUs with TP4/DP4/EP4, attention TP1 and FP8 E4M3 KV. Both use PP1 and A2A `none`.
+
+Eager sets metadata reuse and slot reads to `0` and disables both graphs. Best denotes the explicitly enabled combination configuration: it enables those two features and requests breakable prefill/decode graphs. Nano’s immutable query-geometry LRU is shared by both arms and both ordinary/slot paths; Flash’s single-token reader fast path is also shared by both reader paths. Nano prefill gears are `[512,1024,2048,4096,8192,16384]`, decode gears `[1,2,4,8,16,32]`; Flash uses prefill `[512,1024,4096]`, decode `[1,2,4,8]`. Shared server settings are `max_total_tokens=131072`, `max_running_requests=32`, `max_prefill_tokens=16384` and `context_length=32768`, with 40 sessions and two in-flight commits per rank. Static memory fractions are 0.6/0.8 for Nano/Flash. Fixed collective settings use `NCCL_ALGO=allreduce:tree` and disable custom all-reduce and FlashInfer all-reduce fusion; this is not full native deterministic inference.
+
+Precision uses 64 cases per model: 16 real questions and 16 boundary input lengths, each with empty and populated memory. Populated QA memory contains the same complete selected conversation history within each model (15188 Nano tokens; 14686 Flash tokens). Every candidate follows its model's fresh eager-BS1 token prefix for 128 output positions. Relative L2 is computed independently for each complete vocabulary vector as `||candidate - golden||₂ / ||golden||₂`, then averaged over all positions; Pearson is averaged in the same way. The first-32 and first-128 windows include every vector, including threshold exceedances. Physical BS32 is checked independently of client concurrency. Internal controls retain eager-BS32, repeated BS1, slot-off and historical-main comparisons. Slot-off disables direct slot reads while keeping memory available.
+
+In this Flash QA64 matrix, every prefill falls back to eager execution; graph arms actually use decode graphs. Prefill replay at local gears 512/1024/4096 was exercised by a separate Flash prefill replay/fallback diagnostic, outside the precision table’s QA64 coverage.
+
+| Model / configuration | Mean relative L2, first 32 | Mean Pearson, first 32 | Mean relative L2, first 128 | Mean Pearson, first 128 |
+| --- | ---: | ---: | ---: | ---: |
+| Nano eager BS1 (golden) | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
+| Nano best BS1 | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
+| Nano best BS32 | 0.049405459 | 0.996819092 | 0.056124086 | 0.995009996 |
+| Flash eager BS1 (golden) | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
+| Flash best BS1 | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
+| Flash best BS32 | 0.048546978 | 0.997824768 | 0.051201860 | 0.996930751 |
+
+Both models’ BS32 results fail the original per-position relative L2 < 0.04 and Pearson ≥ 0.999 criteria against their eager-BS1 golden. Within this QA64 matrix, best, slot-off and eager are bitwise equal at the same actual batch size; the batch-shape drift is also present in eager. Artifact validation does not establish BS32 accuracy acceptance.
+
+Nano padding was separately checked at 511/512/513 tokens with empty and populated memory and mixed-length BS2/BS3 batches. Actual graph admission selected 512/512/1024 respectively; mixed groups exercised gears 512/1024/2048. Across two rounds, MemT and the same-weight pure-backbone control each passed matched-batch eager/graph and cross-round repeatability checks, totaling 17,408 bitwise-equal full-vocabulary vector comparisons per model. These controls do not establish batch invariance. Nano retains the native maximum 2× padding factor: with minimum gear 512, inputs below 256 tokens fall back.
+
+The separate Flash diagnostic exercised balanced all-rank prefill replay at local gears 512/1024/4096 and eager fallback for idle/uneven batches. All 96 prefill vectors matched the same-batch eager reference bitwise. Uneven-batch decode retained small differences (maximum relative L2 0.000250868; minimum Pearson 0.999999919), within the diagnostic tolerance. This does not extend the QA64 table to untested execution shapes.
+
+### Client latency
+
+The hardware, checkpoints, parallel configuration, graph gears and capacity settings are the same as the validation setup above. Nano uses BF16 KV and FP32 Mamba state; Flash uses FP8 E4M3 KV. Nano attention/linear attention use Triton; Flash uses dsv4 attention. Both use `moe_runner_backend=triton`, `sampling_backend=pytorch`, `tc_compiler=eager`, FCFS scheduling, disabled radix caching and streaming sessions with a one-token stream interval. The supplied scheduling conservativeness is 1.0, resolved to 0.3 by native Flash DP attention; Nano remains 1.0. Greedy sampling uses temperature 0, with seeds 20261020 for Nano and 511801400 for Flash.
+
+Each query has 512 input tokens, native EOS and at most 256 output tokens. Empty and populated memory are measured separately. Populated performance memory is prepared from a 2048-token commit and imported into a fresh session before timing; it differs from the full-history precision workload. State preparation, session setup and import are outside the query timing interval. Overlap, query chunking, coalescing and diagnostic instrumentation are disabled.
+
+Each condition uses four sequential warmup requests at client concurrency 1, or two successive waves of 32 fresh-session warmup requests at concurrency 32. It then runs three rounds of 32 measured requests, retaining every measured request and outlier. Client concurrency does not specify the physical batch size. The complete matrix contains 544 warmup and 1536 measured requests.
+
+The table reports arithmetic means across the 96 measured requests per condition, in milliseconds. TTFT is submission to the first valid token. Each request's TPOT is the time between its first and last valid token divided by its actual output count minus one; those per-request values are then averaged. A new token in the terminal frame counts, while duplicate terminal tokens and waiting for DONE do not extend TPOT. Actual output lengths are reported because native EOS can stop before 256 tokens; TPOT is undefined for fewer than two output tokens.
+
+Flash best requests both prefill and decode graphs. Startup capture and the separate replay/fallback diagnostic were verified, but formal timing has no per-forward graph counters. A lone request leaves other DP ranks idle and therefore falls back for prefill; admission at concurrency 32 depends on native scheduling, and its replay/fallback frequency was not measured. This is a combined feature comparison, not a graph-only ablation.
+
+**Nano**
+
+| Configuration | Client concurrency | Memory | Output tokens (min / mean / max) | Mean TTFT (ms) | Mean TPOT (ms) |
+| --- | ---: | --- | ---: | ---: | ---: |
+| eager | 1 | empty | 79 / 79.00 / 79 | 80.79 | 64.12 |
+| eager | 1 | nonempty | 134 / 134.00 / 134 | 81.32 | 64.53 |
+| eager | 32 | empty | 103 / 103.00 / 103 | 221.08 | 70.18 |
+| eager | 32 | nonempty | 141 / 141.00 / 141 | 314.74 | 68.98 |
+| best | 1 | empty | 79 / 79.00 / 79 | 34.82 | 7.50 |
+| best | 1 | nonempty | 134 / 134.00 / 134 | 35.14 | 7.40 |
+| best | 32 | empty | 79 / 102.75 / 103 | 263.02 | 9.71 |
+| best | 32 | nonempty | 112 / 140.70 / 141 | 207.50 | 10.29 |
+
+**Flash**
+
+| Configuration | Client concurrency | Memory | Output tokens (min / mean / max) | Mean TTFT (ms) | Mean TPOT (ms) |
+| --- | ---: | --- | ---: | ---: | ---: |
+| eager | 1 | empty | 256 / 256.00 / 256 | 140.99 | 120.77 |
+| eager | 1 | nonempty | 50 / 204.50 / 256 | 140.46 | 120.81 |
+| eager | 32 | empty | 256 / 256.00 / 256 | 644.96 | 122.85 |
+| eager | 32 | nonempty | 14 / 193.05 / 256 | 581.56 | 125.03 |
+| best | 1 | empty | 256 / 256.00 / 256 | 149.58 | 30.13 |
+| best | 1 | nonempty | 50 / 204.50 / 256 | 151.67 | 30.79 |
+| best | 32 | empty | 256 / 256.00 / 256 | 563.41 | 36.91 |
+| best | 32 | nonempty | 14 / 153.12 / 256 | 635.25 | 38.55 |
+
+All measured requests produce at least two output tokens, so TPOT is defined for every row. TPOT is lower for best in this matrix, but TTFT does not improve in every condition. Actual output lengths differ in some concurrency-32 comparisons under native EOS and native scheduling; these are end-to-end workload measurements, not fixed-output or graph-only speedups. All three formal rounds and their outliers are retained. At concurrency 32, Nano eager/nonempty round-mean TTFT is 203.09/211.71/529.43 ms, and Nano best/empty is 210.45/200.87/377.73 ms. These later-round elevations remain included; the timing data do not establish their cause.
 
 ## Python client
 

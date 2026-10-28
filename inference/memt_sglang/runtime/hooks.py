@@ -260,10 +260,7 @@ def install_tokenizer_control(manager):
 
 
 def install_scheduler_hooks():
-    """Pinned, explicit hooks: control and early rejection; prefill chunking is disabled.
-
-    fdebc938: scheduler.get_internal_state/handle_generate_request. No prefill-policy patch.
-    """
+    """Pinned control, admission and opt-in query scheduling hooks."""
     require_sglang()
     import json
 
@@ -275,6 +272,17 @@ def install_scheduler_hooks():
 
     if getattr(Scheduler, "_memt_control_installed", False):
         return
+    from .features import overlap_phases
+    from .query_coalescing import config_from_env, install_query_coalescing
+
+    coalescing = config_from_env()
+    if coalescing is not None:
+        install_query_coalescing(Scheduler, coalescing)
+    prefill, decode = overlap_phases()
+    if prefill or decode:
+        from .decode_overlap import install_phase_overlap
+
+        install_phase_overlap(Scheduler, prefill=prefill, decode=decode)
     native_control = Scheduler.get_internal_state
     native_generate = Scheduler.handle_generate_request
 

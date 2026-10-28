@@ -4,12 +4,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from memt_sglang.models.common.constants import WY_TILE_TOKENS
-from memt_sglang.models.common.packed import boundaries, validate_packed_inputs
-from memt_sglang.models.qwen.ops.layout import build_chunk_plan
+from memt_sglang.models.common.packed import validate_packed_inputs
 from memt_sglang.models.qwen.ops.normalization import l2norm
 from memt_sglang.models.qwen.ops.packed import token_memory_packed
+from memt_sglang.models.qwen.ops.query_plan import query_plan
 from memt_sglang.models.qwen.ops.read import memt_gdn2_read_fwd
+from memt_sglang.models.qwen.ops.slot_read import (
+    slot_query_supported,
+    slot_snapshot_read,
+)
 
 
 class MemTRMSNormGated(nn.Module):
@@ -97,7 +100,15 @@ class QwenMemoryBlock(nn.Module):
         return query_normalized, key_scaled, torch.ones_like(erase_sqrt)
 
     @torch.no_grad()
-    def packed(self, hidden_states, read_states, *, lengths, commit, write_states):
+    def packed(
+        self,
+        hidden_states,
+        read_states,
+        *,
+        lengths,
+        commit,
+        write_states,
+    ):
         validate_packed_inputs(self, hidden_states, read_states, write_states, lengths)
         hidden_batch = hidden_states.unsqueeze(0)
         weight, dim = self.in_proj.weight, self.head_dim
@@ -110,20 +121,10 @@ class QwenMemoryBlock(nn.Module):
         ]
         output_gate = self.g_down(F.linear(hidden_batch, weight[-dim:]))
         if not commit:
-            samples = boundaries(lengths, hidden_states.device)
             # Read fixed snapshots with the released tiled reduction order.
             # Preserve QKV GEMM layout; a q-only GEMM can change rounding.
             q = l2norm(q.contiguous())
-            mask = torch.zeros(
-                len(lengths), device=hidden_states.device, dtype=torch.bool
-            )
-            plan = build_chunk_plan(
-                samples,
-                samples,
-                WY_TILE_TOKENS,
-                event_slice=samples,
-                commit_mask=mask,
-            )
+            plan = query_plan(lengths, hidden_states.device)
             read = memt_gdn2_read_fwd(
                 q, read_states, plan, self.read_scale, out_dtype=v.dtype
             )
@@ -150,6 +151,44 @@ class QwenMemoryBlock(nn.Module):
         )
         output = self.o_norm(read.reshape(-1, dim), output_gate.reshape(-1, dim))
         return output.view(len(hidden_states), self.value_dim), next_state
+
+    @torch.no_grad()
+    def packed_query_slots(
+        self,
+        hidden_states,
+        state_pool,
+        slots,
+        *,
+        lengths,
+    ):
+        if not slot_query_supported(self, hidden_states, state_pool, slots, lengths):
+            states = state_pool.index_select(0, slots)
+            return self.packed(
+                hidden_states,
+                states,
+                lengths=lengths,
+                commit=False,
+                write_states=states,
+            )
+        # Intentionally mirror public packed()'s full QKV GEMM and view layout.
+        # A q-only projection changes BF16 rounding despite discarding K and V.
+        hidden_batch = hidden_states.unsqueeze(0)
+        weight, dim = self.in_proj.weight, self.head_dim
+        q, k, v = F.linear(hidden_batch, weight[: self.qkv_width]).split(
+            self.qkv_rows, dim=-1
+        )
+        q, k, v = [
+            projection.view(1, len(hidden_states), self.num_heads, dim)
+            for projection in (q, k, v)
+        ]
+        output_gate = self.g_down(F.linear(hidden_batch, weight[-dim:]))
+        q = l2norm(q.contiguous())
+        plan = query_plan(lengths, hidden_states.device)
+        read = slot_snapshot_read(
+            q, state_pool, plan, self.read_scale, out_dtype=v.dtype, state_slots=slots
+        )
+        output = self.o_norm(read.reshape(-1, dim), output_gate.reshape(-1, dim))
+        return output.view(len(hidden_states), self.value_dim), None
 
     def forward(self, hidden_states, initial_state, *, commit):
         """Single-request entry; serving calls packed() for batched samples."""
