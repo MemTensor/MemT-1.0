@@ -182,7 +182,7 @@ print(
 
 `chat()` returns text by default, as in HF. With `return_dict=True` (or configured tools), it returns `answer`, completion fields and the native response metadata and `output_ids`. As in HF, generated tokens including thinking, EOS and truncated outputs are retained for replay. `generation_completed` and `turn_completed` distinguish completed generations from length-limited outputs and pending tools.
 
-Automatic commits wait for the final answer of a tool chain, which counts as one logical turn. A truncated current reply is not automatically committed; it remains available for a later completed turn with `enable_memory=True`, `commit_history()` or `save_state()`. On success, `memory_updated=True` and `committed_turns` includes the current logical turn. Clearing conversation context removes committed turns from subsequent prompts, not from `responses` or caller-owned logs.
+Automatic commits wait for the final answer of a tool chain, which counts as one logical turn. A truncated current reply is not automatically committed; it remains available for a later completed turn with `enable_memory=True`, `commit_history()` or `save_state()`. On success, `memory_updated=True` and `committed_turns` include the current logical turn. Clearing conversation context removes committed turns from subsequent prompts, not from `responses` or caller-owned logs.
 
 The following table shows successful request sequences. Each control action is a `POST /memt/control`; queries and commits use `POST /generate`.
 
