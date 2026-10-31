@@ -44,14 +44,17 @@ def calculate_budget(
     available_bytes = int(
         (free_gib - pre_model_load_gib * (1 - mem_fraction_static)) * _GIB
     )
-    pool_bytes = (
-        config.max_sessions_per_rank + config.max_inflight_commits_per_rank
-    ) * session_bytes
+    from .features import candidate_slots_per_transaction
+
+    private_slots = (
+        config.max_inflight_commits_per_rank * candidate_slots_per_transaction()
+    )
+    pool_bytes = (config.max_sessions_per_rank + private_slots) * session_bytes
     # Leave at least one byte for KV; equality is insufficient. This is an upper
     # bound before native GDN reservation, allocator rounding and min_kv_tokens.
     max_sessions = max(
         0,
-        (available_bytes - 1) // session_bytes - config.max_inflight_commits_per_rank,
+        (available_bytes - 1) // session_bytes - private_slots,
     )
     return PoolBudget(pool_bytes, available_bytes - pool_bytes, max_sessions)
 
@@ -146,7 +149,14 @@ def install_alloc_memory_pool_hook(runner_class: type) -> None:
         # The configurator receives server_args (model_runner.py:513-529).
         # Use its resolved fraction, not an independently computed default.
         fraction = self.server_args.mem_fraction_static
-        layout = (tuple(sorted(shapes.items())), config, fraction)
+        from .features import commit_chunk_policy
+
+        layout = (
+            tuple(sorted(shapes.items())),
+            config,
+            fraction,
+            commit_chunk_policy(),
+        )
         signature = (layout, self.device, self.gpu_id)
         previous = getattr(self, "_memt_pool_allocation", None)
         if previous is not None:
@@ -211,12 +221,20 @@ def install_alloc_memory_pool_hook(runner_class: type) -> None:
             # model_runner.py:737 obtains the final native capacity. This catches
             # GDN reservations, alignment and explicit max-total-tokens limits.
             tokens = self.max_total_num_tokens
+            from .features import validate_native_kv_capacity
+
+            validate_native_kv_capacity(
+                tokens, getattr(self.server_args, "max_total_tokens", None)
+            )
             if tokens < config.min_kv_tokens:
                 raise MemoryError(
                     f"SGLang max_total_num_tokens={tokens} is below "
                     f"memt_runtime.min_kv_tokens={config.min_kv_tokens}; "
                     "reduce max_sessions_per_rank and check --max-total-tokens."
                 )
+            hooks = getattr(self.model, "_memory_hooks", None)
+            if hooks is not None:
+                hooks.warmup_memory(self)
             allocation.result = result
             allocation.status = AllocationStatus.READY
             return result
@@ -260,10 +278,7 @@ def install_tokenizer_control(manager):
 
 
 def install_scheduler_hooks():
-    """Pinned, explicit hooks: control and early rejection; prefill chunking is disabled.
-
-    fdebc938: scheduler.get_internal_state/handle_generate_request. No prefill-policy patch.
-    """
+    """Pinned control, admission and opt-in query scheduling hooks."""
     require_sglang()
     import json
 
@@ -275,6 +290,17 @@ def install_scheduler_hooks():
 
     if getattr(Scheduler, "_memt_control_installed", False):
         return
+    from .features import overlap_phases
+    from .query_coalescing import config_from_env, install_query_coalescing
+
+    coalescing = config_from_env()
+    if coalescing is not None:
+        install_query_coalescing(Scheduler, coalescing)
+    prefill, decode = overlap_phases()
+    if prefill or decode:
+        from .decode_overlap import install_phase_overlap
+
+        install_phase_overlap(Scheduler, prefill=prefill, decode=decode)
     native_control = Scheduler.get_internal_state
     native_generate = Scheduler.handle_generate_request
 

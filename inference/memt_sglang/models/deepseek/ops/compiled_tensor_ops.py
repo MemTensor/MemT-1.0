@@ -1,12 +1,26 @@
 """DeepSeek tensor projections and preserved compilation boundaries."""
 
-from functools import cache
+from functools import cache, lru_cache
 
 import torch
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
 from memt_sglang.models.deepseek.ops.normalization import l2norm
+
+
+@lru_cache(maxsize=64)
+def _epsilon_buffer(values, dtype, stream):
+    # Keep immutable constants alive and confined to their initialization stream.
+    # In particular, never round host epsilon values through BF16 model weights.
+    with torch.cuda.stream(stream):
+        return torch.tensor(values, dtype=dtype, device=stream.device)
+
+
+def grouped_epsilon(values, latent):
+    """Materialize host epsilon once, outside the compiled projection graph."""
+    dtype = torch.float64 if latent.dtype == torch.float64 else torch.float32
+    return _epsilon_buffer(tuple(values), dtype, torch.cuda.current_stream(latent.device))
 
 
 def _latent_norm(inputs, weight, eps):
@@ -31,7 +45,7 @@ def expand_grouped_qkv(
         inputs = latent.reshape(-1, groups, rank)
         # Preserve host epsilon precision, including when the block is BF16.
         eps_dtype = torch.float64 if latent.dtype == torch.float64 else torch.float32
-        epsilon = torch.tensor(eps, dtype=eps_dtype, device=latent.device).view(
+        epsilon = torch.as_tensor(eps, dtype=eps_dtype, device=latent.device).view(
             groups, 1
         )
         inputs = _latent_norm(inputs, gain, epsilon)

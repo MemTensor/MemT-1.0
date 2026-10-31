@@ -10,9 +10,7 @@ from memt_sglang.models.common.hf_config import memt_model
 from memt_sglang.runtime.config import RuntimeConfig
 
 REQUIRED_SERVER_VALUES = {
-    "chunked_prefill_size": -1,
     "disable_radix_cache": True,
-    "disable_overlap_schedule": True,
     "pp_size": 1,
     "attn_cp_size": 1,
     "dcp_size": 1,
@@ -111,6 +109,34 @@ def validate_server_args(
     # SGLang consumes --config before constructing ServerArgs; it is not a field.
     if config_file is not None:
         raise ValueError("MemT does not support --config merging")
+    from memt_sglang.runtime.features import (
+        commit_chunk_policy,
+        validate_graphs,
+        validate_overlap,
+        validate_query_chunks,
+    )
+    from memt_sglang.runtime.query_coalescing import config_from_env
+
+    validate_graphs(args)
+    validate_overlap(args)
+    validate_query_chunks(args)
+    if config_from_env() is not None:
+        layout = (args.tp_size, args.dp_size, args.ep_size)
+        if not (
+            (model == "memt-nano" and layout == (2, 1, 1))
+            or (
+                model == "memt-flash"
+                and layout in ((4, 4, 4), (8, 8, 8))
+                and args.enable_dp_attention
+            )
+        ):
+            raise ValueError(
+                "Query coalescing requires Nano TP2/DP1/EP1 or Flash TP=DP=EP4/8"
+            )
+        if args.enable_prefill_delayer:
+            raise ValueError(
+                "Query coalescing cannot be combined with native prefill delay"
+            )
     for name, expected in REQUIRED_SERVER_VALUES.items():
         if getattr(args, name) != expected:
             raise ValueError(f"MemT requires {name}={expected!r}")
@@ -120,20 +146,6 @@ def validate_server_args(
     for name in DISALLOWED_SERVER_FLAGS:
         if getattr(args, name):
             raise ValueError(f"MemT does not support {name}")
-    graph = args.cuda_graph_config
-    for phase in ("prefill", "decode"):
-        item = (
-            graph.get(phase, {})
-            if isinstance(graph, Mapping)
-            else getattr(graph, phase, None)
-        )
-        backend = (
-            item.get("backend")
-            if isinstance(item, Mapping)
-            else getattr(item, "backend", None)
-        )
-        if backend != "disabled":
-            raise ValueError(f"MemT requires {phase} CUDA graphs disabled")
     for name, supported in MODEL_SERVER_VALUES[model].items():
         if getattr(args, name) not in supported:
             raise ValueError(f"{model} requires {name} in {supported!r}")
@@ -141,8 +153,9 @@ def validate_server_args(
         raise ValueError(
             "MemT-1.0-Flash requires attention TP=1 (DP attention with tp_size == dp_size)"
         )
-    if args.max_prefill_tokens < chunk_tokens:
-        raise ValueError(f"max_prefill_tokens must be at least {chunk_tokens}")
+    minimum_prefill = 1 if commit_chunk_policy() == "global" else chunk_tokens
+    if args.max_prefill_tokens < minimum_prefill:
+        raise ValueError(f"max_prefill_tokens must be at least {minimum_prefill}")
     if Path(args.model_path).expanduser().resolve() != Path(model_path).resolve():
         raise ValueError("Engine model path differs from the validated config.json")
     if json.loads(args.json_model_override_args) != {"memt_runtime": runtime}:

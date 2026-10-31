@@ -6,8 +6,10 @@ from memt_sglang.models.common.hooks import MemoryHooks
 class QwenMemoryHooks(MemoryHooks):
     def __init__(self, model, blocks):
         self.model = model
+        self.blocks = blocks
         self.pending = {}
         self.handles = []
+        eager_memory = self.setup_execution(dp_attention=False)
         layers = model.model.layers
         for index, block in blocks.items():
             layer = layers[index]
@@ -34,21 +36,44 @@ class QwenMemoryHooks(MemoryHooks):
             # o_proj input already includes the native sigmoid attention gate.
             self.handles.append(
                 layer.qkv_proj.register_forward_pre_hook(
-                    self._prepare(index, layer), with_kwargs=True
+                    eager_memory(self._prepare(index, layer)), with_kwargs=True
                 )
             )
             self.handles.append(
-                layer.o_proj.register_forward_pre_hook(self._inject(index))
+                layer.o_proj.register_forward_pre_hook(
+                    eager_memory(self._inject(index))
+                )
             )
 
     def _prepare(self, index, layer):
         def hook(module, args, kwargs):
             runtime = getattr(self.model, "memt_runtime", None)
-            if runtime is None or runtime.plan is None or not runtime.plan.samples:
+            graph = self.memory_decode_graph
+            if graph is not None and graph.capture_active:
+                hidden = args[0] if args else kwargs["input_"]
+                residual = graph.read(index, hidden, layer.memt)
+                heads = residual.view(len(hidden), layer.memt.num_heads, layer.head_dim)
+                start = layer.attn_tp_rank * layer.num_heads
+                self.pending[index] = heads[:, start : start + layer.num_heads].reshape(
+                    len(hidden), -1
+                )
+                return
+            active = (
+                runtime is not None
+                and runtime.plan is not None
+                and bool(runtime.plan.samples)
+            )
+            if not active and not self.graph_enabled:
                 return
             hidden = args[0] if args else kwargs["input_"]
+            if len(hidden) == 0:
+                return
             output = hidden.new_empty((len(hidden), layer.memt.value_dim))
-            residual = runtime.run_layer(index, hidden, output, layer.memt)
+            residual = (
+                runtime.run_layer(index, hidden, output, layer.memt)
+                if active
+                else output.zero_()
+            )
             # Each rank computes with its own full-head state, then slices.
             heads = residual.view(len(hidden), layer.memt.num_heads, layer.head_dim)
             start = layer.attn_tp_rank * layer.num_heads
@@ -61,6 +86,12 @@ class QwenMemoryHooks(MemoryHooks):
     def _inject(self, index):
         def hook(module, args):
             residual = self.pending.pop(index, None)
+            if (
+                self.memory_decode_graph is not None
+                and self.memory_decode_graph.capture_active
+                and residual is not None
+            ):
+                self.memory_decode_graph.injected.add((index, len(residual)))
             return args if residual is None else (args[0] + residual, *args[1:])
 
         return hook

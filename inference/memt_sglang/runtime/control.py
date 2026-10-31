@@ -115,6 +115,32 @@ class WorkerControl:
         self.sessions.begin(session, envelope["transaction"])
 
     def _prepare(self, envelope):
+        from memt_sglang.protocol import MemoryRequest
+        from memt_sglang.runtime.features import commit_chunk_policy
+        from memt_sglang.runtime.partial_scheduler import partial_swa_floor
+
+        request = MemoryRequest.from_rid(envelope["request_id"])
+        if request.operation == "commit" and commit_chunk_policy() != "atomic":
+            reserve = int(os.environ.get("MEMT_PARTIAL_QUERY_TOKEN_RESERVE", "4096"))
+            needed = request.length + self.scheduler.page_size + reserve
+            full = self.scheduler.max_total_num_tokens
+            swa = getattr(self.scheduler, "swa_tokens_per_layer", None)
+            swa_needed = (
+                partial_swa_floor(
+                    commit_chunk_policy(),
+                    1,
+                    self.scheduler.tree_cache.sliding_window_size,
+                    self.scheduler.page_size,
+                    reserve,
+                )
+                if swa is not None and swa > 0
+                else 0
+            )
+            if needed > full or (swa_needed and swa_needed > swa):
+                raise CapacityError(
+                    "Logical commit cannot fit full KV credits or SWA window/step "
+                    "headroom; increase capacity or lower context/chunk budget"
+                )
         self.sessions.prepare(
             envelope["request_id"],
             envelope.get("transaction"),
@@ -156,6 +182,14 @@ class WorkerControl:
             **self.sessions.status(session),
             "memory_read": self.sessions.memory_read[session],
         }
+        actual = getattr(self.scheduler, "max_total_num_tokens", None)
+        if actual is not None:
+            allocator = self.scheduler.token_to_kv_pool_allocator
+            result["native_kv_capacity"] = {
+                "full_tokens": actual,
+                "swa_tokens": getattr(allocator, "_size_swa", None),
+                "requested_full_tokens": self.scheduler.server_args.max_total_tokens,
+            }
         if session in self.runtime.kv_sessions:
             result = {**result, "kv": kv_status(self.scheduler, session)}
         return result
