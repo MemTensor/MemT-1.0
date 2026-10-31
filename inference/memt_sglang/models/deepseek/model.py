@@ -15,6 +15,20 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
     """Native backbone names plus the published MemT memory parameter names."""
 
     def __init__(self, config, quant_config=None, prefix=""):
+        from memt_sglang.runtime.features import enabled
+
+        if enabled("C4_STABLE_TOPK"):
+            # The old canonical-order module was removed upstream; the stable
+            # dispatch is what keeps capture/replay top-k tie-breaking identical.
+            from memt_sglang.runtime.stable_c4 import install as install_stable_c4
+
+            install_stable_c4({"index_topk": getattr(config, "index_topk", 512)})
+        if enabled("MEMORY_DECODE_GRAPH"):
+            from sglang.srt.runtime_context import get_server_args
+
+            from memt_sglang.runtime.features import validate_flash_decode_graph
+
+            validate_flash_decode_graph(get_server_args())
         self._memory_config = config.memory_config
         self._memory_loaded = False
         super().__init__(config, quant_config=quant_config, prefix=prefix)

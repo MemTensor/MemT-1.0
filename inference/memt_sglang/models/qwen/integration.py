@@ -6,6 +6,7 @@ from memt_sglang.models.common.hooks import MemoryHooks
 class QwenMemoryHooks(MemoryHooks):
     def __init__(self, model, blocks):
         self.model = model
+        self.blocks = blocks
         self.pending = {}
         self.handles = []
         eager_memory = self.setup_execution(dp_attention=False)
@@ -47,6 +48,16 @@ class QwenMemoryHooks(MemoryHooks):
     def _prepare(self, index, layer):
         def hook(module, args, kwargs):
             runtime = getattr(self.model, "memt_runtime", None)
+            graph = self.memory_decode_graph
+            if graph is not None and graph.capture_active:
+                hidden = args[0] if args else kwargs["input_"]
+                residual = graph.read(index, hidden, layer.memt)
+                heads = residual.view(len(hidden), layer.memt.num_heads, layer.head_dim)
+                start = layer.attn_tp_rank * layer.num_heads
+                self.pending[index] = heads[:, start : start + layer.num_heads].reshape(
+                    len(hidden), -1
+                )
+                return
             active = (
                 runtime is not None
                 and runtime.plan is not None
@@ -75,6 +86,12 @@ class QwenMemoryHooks(MemoryHooks):
     def _inject(self, index):
         def hook(module, args):
             residual = self.pending.pop(index, None)
+            if (
+                self.memory_decode_graph is not None
+                and self.memory_decode_graph.capture_active
+                and residual is not None
+            ):
+                self.memory_decode_graph.injected.add((index, len(residual)))
             return args if residual is None else (args[0] + residual, *args[1:])
 
         return hook

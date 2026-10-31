@@ -16,6 +16,8 @@ from memt_sglang.protocol import (
     TransactionStatus,
 )
 from memt_sglang.runtime.config import MAX_TRANSACTION_RECEIPTS
+from memt_sglang.runtime.features import commit_chunk_policy
+from memt_sglang.runtime.plan import validate_commit_span
 
 
 @dataclass
@@ -32,6 +34,12 @@ class PreparedRequest:
     slot: int  # Query: the published slot. Commit: the transaction slot.
     complete: bool = False
     receipt: str | None = None
+    progress: int = 0
+    commit_policy: str = "atomic"
+    replay_base_slot: int | None = None
+    base_has_memory: bool = False
+    rewind_pending: bool = False
+    rewind_count: int = 0
 
 
 class WorkerSessions:
@@ -94,11 +102,14 @@ class WorkerSessions:
 
     def prepare(self, rid, transaction=None, *, receipt=None):
         request = MemoryRequest.from_rid(rid)
+        policy = commit_chunk_policy() if request.operation == "commit" else "atomic"
         receipt = receipt or request.nonce
         self.require(request.session)
         if self.has_active_request(request.session):
             raise SessionError("Session has an active request")
         slot = self.pool.sessions[request.session]
+        replay_base = None
+        base_has_memory = False
         if request.operation == "commit":
             transaction_state = self.transaction(request.session, transaction)
             if len(transaction_state.receipts) >= MAX_TRANSACTION_RECEIPTS:
@@ -110,28 +121,83 @@ class WorkerSessions:
                     "Commit nonce already used; inspect transaction status"
                 )
             slot = transaction_state.slot
+            base_has_memory = transaction_state.has_memory
+            if policy != "atomic":
+                replay_base = self.pool.take_slot()
+                try:
+                    self._copy(slot, replay_base)
+                except BaseException:
+                    self.pool.return_slot(replay_base)
+                    raise
             transaction_state.receipts[receipt] = ReceiptStatus.PENDING
-        self.requests[rid] = PreparedRequest(request, slot, receipt=receipt)
+        self.requests[rid] = PreparedRequest(
+            request,
+            slot,
+            receipt=receipt,
+            commit_policy=policy,
+            replay_base_slot=replay_base,
+            base_has_memory=base_has_memory,
+        )
 
-    def advance(self, rid, count):
-        """Record a commit whose forward already wrote the transaction slot."""
+    def mark_retracted(self, rid):
+        """Native KV reset is authoritative; defer GPU restoration to begin()."""
+        record = self.requests.get(rid)
+        if record is None or record.request.operation != "commit":
+            return
+        if record.commit_policy == "atomic":
+            return
+        if record.complete:
+            raise SessionError("A completed commit cannot be retracted")
+        record.rewind_pending = True
+
+    def prepare_span(self, rid, prefix, count):
         record = self.requests[rid]
-        if record.complete or count != record.request.length:
-            raise RuntimeError("Commit must finish in exactly one forward")
-        record.complete = True
+        if record.rewind_pending:
+            validate_commit_span(record.request, prefix, count, record.commit_policy)
+            if prefix != 0 or record.replay_base_slot is None:
+                raise SessionError("Retraction must restart from the complete input")
+            self._copy(record.replay_base_slot, record.slot)
+            record.progress = 0
+            record.rewind_pending = False
+            record.rewind_count += 1
+            self.transactions[
+                record.request.session
+            ].has_memory = record.base_has_memory
+        self.validate_span(rid, prefix, count)
+
+    def validate_span(self, rid, prefix, count):
+        """Reject replay/gaps before writes; recovery must roll back explicitly."""
+        record = self.requests[rid]
+        if record.request.operation != "commit" or record.complete:
+            raise SessionError("Commit is not active")
+        if record.rewind_pending:
+            raise SessionError("Pending retraction requires state restoration")
+        if prefix != record.progress:
+            raise SessionError("Commit prefix replay or gap requires explicit recovery")
+        validate_commit_span(record.request, prefix, count, record.commit_policy)
+
+    def advance(self, rid, count, *, prefix=0):
+        """A fragment has written candidate state; only the last earns a receipt."""
+        self.validate_span(rid, prefix, count)
+        record = self.requests[rid]
+        record.progress += count
+        record.complete = record.progress == record.request.length
         transaction_state = self.transactions[record.request.session]
-        transaction_state.receipts[record.receipt] = ReceiptStatus.APPLIED
+        if record.complete:
+            transaction_state.receipts[record.receipt] = ReceiptStatus.APPLIED
         transaction_state.has_memory = True
 
     def fence(self, session, rid=None):
         """Retire exact IDs; late native steps become no-ops.
 
-        A commit retired before its forward never wrote the transaction slot. Its
-        receipt becomes aborted, so the transaction can no longer be published.
+        Partial forwards may already have written a private candidate. Aborting
+        its receipt prevents publication; the published slot is never modified.
         """
         for key, record in list(self.requests.items()):
             if record.request.session != session or (rid is not None and key != rid):
                 continue
+            if record.replay_base_slot is not None:
+                self.pool.return_slot(record.replay_base_slot)
             del self.requests[key]
             if record.request.operation == "commit" and not record.complete:
                 self.transactions[session].receipts[record.receipt] = (

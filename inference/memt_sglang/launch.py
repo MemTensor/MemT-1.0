@@ -67,6 +67,11 @@ def prepare(argv):
         "PREFILL_GRAPH",
         "DECODE_GRAPH",
         "QUERY_CHUNKS",
+        "NANO_COMPILE",
+        "COMMIT_PLAN_CACHE",
+        "MEMORY_DECODE_GRAPH",
+        "PADDED_DECODE_QUERY",
+        "REQUIRE_NATIVE_KV_CAPACITY",
     ):
         enabled(feature)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -332,6 +337,11 @@ def main(argv=None):
         deterministic_communication=options.deterministic_communication,
     )
     identity = resolve_flash_prefill(options, args, identity)
+    from memt_sglang.runtime.features import validate_numerics_tier
+
+    # Enforced here, before any worker starts: the tier decides whether the
+    # deterministic switches are allowed to be set at all.
+    identity["numerics_tier"] = validate_numerics_tier(args)
     identity["execution"] = execution_identity(args)
     identity["mode"] = (
         "breakable"
@@ -345,6 +355,11 @@ def main(argv=None):
         name: metadata.version(name) for name in ("sglang", "torch", "transformers")
     }
     identity["max_prefill_tokens"] = args.max_prefill_tokens
+    identity["max_commit_tokens"] = (
+        (args.context_length or args.max_prefill_tokens)
+        if identity["execution"]["commit_chunk_policy"] != "atomic"
+        else args.max_prefill_tokens
+    )
     from transformers import AutoTokenizer
 
     from memt_sglang.models.common.snapshot_identity import snapshot_identity

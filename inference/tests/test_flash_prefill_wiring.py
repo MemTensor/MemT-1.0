@@ -209,7 +209,7 @@ def test_main_gates_before_launch_and_preserves_wrapper_scheduler(model, monkeyp
     monkeypatch.setattr(launch, "sync_graph_config", lambda a: calls.append("sync"))
     monkeypatch.setattr(launch, "validate_server_args", lambda *a, **kw: calls.append("policy"))
     monkeypatch.setattr(fp, "validate_capture_request", gate)
-    monkeypatch.setattr(launch, "execution_identity", lambda a: {"graph_backends": {"prefill": "breakable"}})
+    monkeypatch.setattr(launch, "execution_identity", lambda a: {"graph_backends": {}, "commit_chunk_policy": "atomic"})
     monkeypatch.setattr(launch.metadata, "version", lambda name: "test-only")
     monkeypatch.setitem(sys.modules, "sglang.srt.entrypoints", NS(http_server=http))
     monkeypatch.setitem(sys.modules, "sglang.srt.server_args", NS(prepare_server_args=parse))

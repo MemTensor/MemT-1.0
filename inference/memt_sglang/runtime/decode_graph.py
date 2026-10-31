@@ -83,8 +83,18 @@ def install_decode_query_guard():
     def can_run(self, batch):
         runtime = getattr(self.model_runner.model, "memt_runtime", None)
         if runtime is not None and not query_graph_allowed(runtime, batch, "decode"):
+            hooks = getattr(self.model_runner.model, "_memory_hooks", None)
+            manager = getattr(hooks, "memory_decode_graph", None)
+            if manager is not None:
+                manager.note_fallback("query_guard")
             return False
-        return original_can_run(self, batch)
+        allowed = original_can_run(self, batch)
+        if runtime is not None and not allowed:
+            hooks = getattr(self.model_runner.model, "_memory_hooks", None)
+            manager = getattr(hooks, "memory_decode_graph", None)
+            if manager is not None:
+                manager.note_fallback("native_shape_or_mode")
+        return allowed
 
     @wraps(original_execute)
     def execute(self, batch, *args, **kwargs):
@@ -95,6 +105,14 @@ def install_decode_query_guard():
         success = False
         try:
             result = original_execute(self, batch, *args, **kwargs)
+            manager = getattr(
+                self.model_runner.model._memory_hooks, "memory_decode_graph", None
+            )
+            if manager is not None:
+                captured_layers = {layer for layer, _ in manager.prepared}
+                if captured_layers != set(runtime.pool.storage):
+                    raise RuntimeError("Memory graph does not cover every memory layer")
+                runtime._layers.update(captured_layers)
             if self.model_runner.model._memory_hooks.pending:
                 raise RuntimeError("Decode graph left an unconsumed memory residual")
             success = True

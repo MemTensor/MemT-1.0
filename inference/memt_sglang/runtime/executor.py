@@ -40,6 +40,11 @@ class MemoryRuntime:
             for rid in (forward_batch.rids or [])
         ]
         plan = StepPlan.from_batch(batch)
+        for sample in plan.samples:
+            if sample.request.operation == "commit":
+                self.worker_sessions.prepare_span(
+                    sample.request.rid, sample.prefix_length, sample.stop - sample.start
+                )
         self.plan = plan
         return plan
 
@@ -72,6 +77,16 @@ class MemoryRuntime:
         return output
 
     def _run_prepared(self, layer, hidden, output, compute):
+        if (
+            enabled("PADDED_DECODE_QUERY")
+            and self.slot_read
+            and self.plan.samples
+            and all(
+                s.decode and s.request.operation == "query" for s in self.plan.samples
+            )
+        ):
+            self._run_padded_query(layer, hidden, output, compute)
+            return
         baseline_layout = not (self.metadata_cache or self.slot_read)
         for commit in (False, True):
             key = (commit, hidden.device, _metadata_stream(hidden.device))
@@ -132,6 +147,50 @@ class MemoryRuntime:
             if commit:
                 self.pool.storage[layer].index_copy_(0, group.slots, final.unsqueeze(1))
 
+    def _run_padded_query(self, layer, hidden, output, compute):
+        """Keep the native decode row geometry in the compiled reference too."""
+        key = (False, hidden.device, _metadata_stream(hidden.device))
+        if not self.metadata_cache or key not in self._prepared_groups:
+            group = prepare_group(
+                self.plan,
+                self.worker_sessions,
+                hidden.device,
+                commit=False,
+                slot_read=True,
+            )
+            if self.metadata_cache:
+                self._prepared_groups[key] = group
+        else:
+            group = self._prepared_groups[key]
+        if group is None:
+            return
+        reader = getattr(compute, "packed_query_slots", None)
+        if not callable(reader):
+            raise RuntimeError("Padded decode query requires a masked slot reader")
+        slot_key = ("padded_decode", hidden.device, len(hidden), _metadata_stream(hidden.device))
+        if not self.metadata_cache or slot_key not in self._prepared_groups:
+            slots = torch.full(
+                (len(hidden),), -1, dtype=torch.int64, device=hidden.device
+            )
+            if group.span is not None:
+                slots[slice(*group.span)].copy_(group.slots)
+            else:
+                slots.index_copy_(0, group.indices, group.slots)
+            if self.metadata_cache:
+                self._prepared_groups[slot_key] = slots
+        else:
+            slots = self._prepared_groups[slot_key]
+        residual, final = reader(
+            hidden, self.pool.storage[layer][:, 0], slots, lengths=(1,) * len(hidden)
+        )
+        if (
+            final is not None
+            or residual.shape != output.shape
+            or residual.dtype != output.dtype
+        ):
+            raise RuntimeError("Padded read-only decode invariant violated")
+        output.copy_(torch.where(slots[:, None] >= 0, residual, 0))
+
     def finish(self, success: bool) -> None:
         if self.plan is None:
             raise SessionError("No active memory step")
@@ -143,7 +202,9 @@ class MemoryRuntime:
             for sample in self.plan.samples:
                 if sample.request.operation == "commit":
                     self.worker_sessions.advance(
-                        sample.request.rid, sample.stop - sample.start
+                        sample.request.rid,
+                        sample.stop - sample.start,
+                        prefix=sample.prefix_length,
                     )
         finally:
             self.plan = None

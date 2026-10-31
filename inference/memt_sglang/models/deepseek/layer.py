@@ -6,6 +6,7 @@ from torch import nn
 from memt_sglang.models.common.packed import validate_packed_inputs
 from memt_sglang.models.deepseek.config import DeepSeekMemoryConfig
 from memt_sglang.models.deepseek.ops.compiled_tensor_ops import (
+    grouped_epsilon,
     resolve_gated_rms_norm,
     resolve_grouped_qkv_expansion,
     resolve_head_expansion,
@@ -126,8 +127,8 @@ class DeepSeekMemoryBlock(nn.Module):
             self.v_group_up[:],
             self.k_group_norm[:],
             self.v_group_norm[:],
-            self.k_group_norm_eps,
-            self.v_group_norm_eps,
+            grouped_epsilon(self.k_group_norm_eps, parts[1]),
+            grouped_epsilon(self.v_group_norm_eps, parts[2]),
         )
         outputs = resolve_head_expansion()(
             (q, k, v, *parts[3:]),
@@ -162,14 +163,38 @@ class DeepSeekMemoryBlock(nn.Module):
             write_states=write_states,
         )
 
+    def query_capture_constants(self, lengths):
+        """Pin the compiled graph's external epsilon inputs beyond LRU eviction."""
+        return (
+            grouped_epsilon(self.k_group_norm_eps, self.in_proj.weight),
+            grouped_epsilon(self.v_group_norm_eps, self.in_proj.weight),
+        )
+
     @torch.no_grad()
     def packed_query_slots(self, hidden_states, state_pool, slots, *, lengths):
         from memt_sglang.models.deepseek.ops.slot_read import gather_bf16
 
-        if (hidden_states.ndim != 2 or hidden_states.shape[1] != self.hidden_size or (not hidden_states.is_cuda) or (hidden_states.dtype != torch.bfloat16) or (not lengths) or any((type(length) is not int or length < 1 for length in lengths)) or (sum(lengths) != len(hidden_states))) or (state_pool.shape[1:] != (self.num_heads, self.head_dim, self.head_dim) or state_pool.device != hidden_states.device or slots.numel() != len(lengths)):
+        if (
+            hidden_states.ndim != 2
+            or hidden_states.shape[1] != self.hidden_size
+            or (not hidden_states.is_cuda)
+            or (hidden_states.dtype != torch.bfloat16)
+            or (not lengths)
+            or any((type(length) is not int or length < 1 for length in lengths))
+            or (sum(lengths) != len(hidden_states))
+        ) or (
+            state_pool.shape[1:] != (self.num_heads, self.head_dim, self.head_dim)
+            or state_pool.device != hidden_states.device
+            or slots.numel() != len(lengths)
+        ):
             states = state_pool.index_select(0, slots)
-            return self.packed(hidden_states, states, lengths=lengths,
-                               commit=False, write_states=states)
+            return self.packed(
+                hidden_states,
+                states,
+                lengths=lengths,
+                commit=False,
+                write_states=states,
+            )
         read_states = gather_bf16(state_pool, slots)
         return self._compute_packed(
             hidden_states,

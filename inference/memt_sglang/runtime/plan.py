@@ -3,6 +3,28 @@
 from dataclasses import dataclass
 
 from memt_sglang.protocol import MemoryRequest, is_memt_rid
+from memt_sglang.runtime.features import commit_chunk_policy
+
+
+def validate_commit_span(request, prefix, count, policy):
+    """Validate logical offsets before any layer mutates private state."""
+    if (
+        type(prefix) is not int
+        or type(count) is not int
+        or prefix < 0
+        or count <= 0
+        or prefix + count > request.length
+    ):
+        raise ValueError("Commit fragment is outside its logical input")
+    if policy == "atomic":
+        if prefix != 0 or count != request.length:
+            raise ValueError("Commit was split or has a cached prefix")
+    elif policy == "tail":
+        tail_start = request.length // 2048 * 2048
+        if prefix < tail_start and (prefix % 2048 != 0 or count != 2048):
+            raise ValueError("Tail policy requires complete ordinary 2048-token blocks")
+    elif policy != "global":
+        raise ValueError("Unknown commit chunk policy")
 
 
 @dataclass(frozen=True)
@@ -59,12 +81,8 @@ class StepPlan:
                 touched.add(request.session)
                 if request.operation == "commit" and decode:
                     raise ValueError("commit cannot decode")
-                if request.operation == "commit" and (
-                    prefix != 0 or length != request.length
-                ):
-                    raise ValueError(
-                        "Commit was split or has a cached prefix; no state published"
-                    )
+                if request.operation == "commit":
+                    validate_commit_span(request, prefix, length, commit_chunk_policy())
                 samples.append(Sample(request, offset, offset + length, prefix, decode))
             offset += length
         non_padding = getattr(batch, "num_token_non_padded_cpu", None)

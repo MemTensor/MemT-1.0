@@ -59,6 +59,15 @@ class SessionService:
         self.dp_size = dp_size
         self.max_sessions = config.max_sessions_per_rank
         self.max_prefill_tokens = identity["max_prefill_tokens"]
+        self.commit_policy = identity.get("execution", {}).get(
+            "commit_chunk_policy", "atomic"
+        )
+        self.commit_semantics_version = identity.get("execution", {}).get(
+            "commit_semantics_version", "atomic-fresh-kv-v1"
+        )
+        self.max_commit_tokens = identity.get(
+            "max_commit_tokens", self.max_prefill_tokens
+        )
         self.chunk_tokens = identity["chunk_tokens"]
         self.sessions = {}
         self.clock = clock
@@ -74,6 +83,9 @@ class SessionService:
             "memory_snapshot": SNAPSHOT_FORMAT,
             "chunk_tokens": self.chunk_tokens,
             "max_prefill_tokens": self.max_prefill_tokens,
+            "max_commit_tokens": self.max_commit_tokens,
+            "commit_chunk_policy": self.commit_policy,
+            "commit_semantics_version": self.commit_semantics_version,
             "snapshot_identity": self.snapshot_identity,
             "memory_encoding": self.memory_encoding,
         }
@@ -273,7 +285,7 @@ class SessionService:
             raise ValueError("cancel requires request_id")
         if state.busy:
             if rid != state.active_query or state.active_internal is None:
-                raise SessionError("Cancel ID does not match the active query")
+                raise SessionError("Cancel ID does not match the active request")
             state.cancelled_query = rid
             await self._call(state, "fence", session, request_id=state.active_internal)
             deadline = monotonic() + RETIRE_TIMEOUT_SECONDS
@@ -414,7 +426,11 @@ class SessionService:
 
     async def prepare(self, payload):
         self._check_epoch(payload.get("memt_epoch"))
-        request = validate_payload(payload, max_prefill_tokens=self.max_prefill_tokens)
+        operation = MemoryRequest.from_rid(payload.get("rid")).operation
+        limit = (
+            self.max_commit_tokens if operation == "commit" else self.max_prefill_tokens
+        )
+        request = validate_payload(payload, max_prefill_tokens=limit)
         state = self._owned(request.session, payload.get("memt_lease"))
         if payload.get("session_params") and not state.retain_kv:
             raise SessionError("Session was not created with retain_kv")
@@ -430,7 +446,7 @@ class SessionService:
         internal = MemoryRequest(
             request.session, request.operation, uuid4().hex, length=request.length
         )
-        if request.operation == "query":
+        if request.operation == "query" or self.commit_policy != "atomic":
             state.active_query = request.rid
             state.active_internal = internal.rid
             state.cancelled_query = None

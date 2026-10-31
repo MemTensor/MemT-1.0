@@ -18,6 +18,95 @@
 - [Checkpoint 与快照格式](#checkpoint-与快照格式)
 - [许可证](#许可证)
 
+### Flash 记忆 decode 图的额外要求
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` 把记忆读取路径纳入 decode CUDA 图。它是本包中
+唯一一项带来 decode 提速的改动，同时也是前置条件最多的开关，因此这里给出**一整段可复制**的
+配置，而不是分散说明。
+
+**overlay 是独立交付物。** 下面每一项能力都通过显式的 API 版本常量探测，而不是 `hasattr`，
+所以 overlay 缺失时会在启动阶段失败，不会静默降级。把 overlay 放到 site-packages 之前：
+
+```bash
+export PYTHONPATH=/path/to/sglang-flash-release-v2:$PYTHONPATH
+```
+
+#### 完整开关集合
+
+```bash
+# 必需：打开图，并保留它捕获的读取路径。
+export MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1
+export MEMT_EXPERIMENT_SLOT_READ=1
+
+# 必需：replay 一致性。捕获只记录一次设备地址与控制流，之后每次 replay 重放同一批节点，
+# 因此任何"在 replay 时可能选中不同 KV 行"的因素都必须在捕获前固定。
+export MEMT_EXPERIMENT_C4_STABLE_TOPK=1               # top-k 平局打破稳定
+export MEMT_EXPERIMENT_PADDED_DECODE_QUERY=1          # decode 几何定长
+export MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY=1   # KV 容量未被裁剪
+export SGLANG_DSV4_PIN_DECODE_INTERMEDIATES=1         # 保留被捕获的张量所有者
+export SGLANG_DSV4_DETERMINISTIC_PROFILE=1            # 见下方说明
+
+# overlay 默认值；一并列出，因为同一个校验会读取它们。
+export SGLANG_OPT_USE_TILELANG_MHC_PRE=1
+export SGLANG_OPT_DEEPGEMM_HC_PRENORM=1
+```
+
+启动时解码图需为 breakable：
+
+```bash
+--cuda-graph-config '{"prefill":{"backend":"disabled"},"decode":{"backend":"breakable","bs":[1,2,3,4,7,8,16,24,32],"max_bs":32}}'
+```
+
+overlap 调度与 PDMux 必须关闭；开任一者在启动期即被拒绝。
+
+#### 为什么只设 `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` 不够
+
+overlay 里计算的是
+
+```python
+_pin_decode_graph_owners = (
+    SGLANG_DSV4_DETERMINISTIC_PROFILE and SGLANG_DSV4_PIN_DECODE_INTERMEDIATES
+)
+```
+
+**两个都设**才真正保留被捕获的张量。本包同时要求两者，报错会点名缺的是哪一个。
+只设后者会得到一张能捕获、能 replay、不报错的图，但它读的是自己从未保留的张量存储——
+实测该配置下最大 case 的 target-logprob p99 高于 0.1，而正确 pin 之后为 0.000724。
+
+#### 成功信号
+
+每个 rank 的日志应出现一行：
+
+```
+MemT memory decode captured: local buckets=[...], graph segments=[1], native tensor owners=N
+```
+
+**每个 bucket 都是 `graph segments=[1]` 才是关键。** 出现 `2` 或更大说明图被截断
+（最可能是捕获期间重新进入了某个 Python 回调），只有部分被录制。**这不是服务器会报错的状态，
+它只是变慢**，所以必须靠看日志确认。
+
+#### 失败信息对照
+
+| 报错 | 原因 |
+| --- | --- |
+| `... requires the separately supplied SGLang stable exact top-k API v1` | `PYTHONPATH` 里没有 overlay，或 overlay 版本过旧 |
+| `... requires these switches to be set exactly; missing or wrong: <names>` | 上面某一行未设或设为 `0`；报错会点名 |
+| `Memory decode graph requires breakable decode and SLOT_READ=1` | `--cuda-graph-config` 的 decode backend 是 `disabled`，或 `SLOT_READ` 未开 |
+| `Memory decode graph requires overlap scheduling disabled` | 未传 `--disable-overlap-schedule`，或开了 overlap |
+| `MemT stable C4 profile currently validates CUDA SM103 only` | 非 SM103（B300 级别）设备。kernel 本身没有架构分支，这道门是**验证范围限制**，不是硬件需求 |
+
+数值可复现性是独立、由使用者显式选择的档位：
+
+| `MEMT_NUMERICS` | 保证什么 | Nano 上实测代价 |
+| --- | --- | --- |
+| `fast`（默认） | 结果正确；同一请求的答案可能随「批里还有什么」而变 | 基准 |
+| `strict` | 并发 32 下同一请求跨轮可复现 | TPOT +7.7%（C1）~ +16.6%（C32） |
+
+依据：同一冻结初态、greedy 生成 256 token、10 轮。并发 32 时 `strict` 复现
+288/288 对请求，`fast` 为 256/288（88.9%）；并发 1 时两者都是 288/288。
+选择 `fast` 却同时传入 `--enable-deterministic-inference` 或任一 `SGLANG_DSV4_*`
+profile 开关时报错，而不是静默降级。
+
 ## 安装
 
 服务端部署需要 Linux、NVIDIA CUDA 和 Python 3.11 或更新版本。在选定的环境中，从本目录安装：
@@ -55,6 +144,31 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
   --port 30001 --state-directory /data/memt-state
 ```
 
+### 推荐组合（实测，不是声明）
+
+每一行都在冻结初态上跑了 10 轮，并发 1 与 32，512 token 查询，TPOT 单位 ms/token。
+行标题写明实际启用的开关，不用 "best" 这类笼统标签。
+
+| 模型 | 启用的特性 | 数值档位 | C1 TPOT | C32 TPOT | 结论 |
+| --- | --- | --- | ---: | ---: | --- |
+| Nano | metadata cache、slot read、decode graph | `strict` | 7.48 | 10.98 | 推荐 |
+| Nano | 同上 | `fast` | 7.48 | 10.98 | 相对另一个基准快 7.7%/16.6%，见上方档位表 |
+| Nano | 同上 + prefill graph | `strict` | 9.04 | 11.59 | **不推荐**：慢 21% |
+| Flash | metadata cache、slot read、decode graph | `strict` | 28.12 | 32.48 | 推荐 |
+| Flash | 同上 | `fast` | 16.60 | 22.58 | 快 41%/31%，但先看可复现率 |
+| Flash | 同上 + prefill graph | `strict` | 28.92 | 36.70 | **不推荐**：慢 3%/13% |
+
+两条需要直说的结论：
+
+- **prefill 图在我们这套配置下没有收益。** Nano 与 Flash 都确认入图（服务日志有捕获记录）、
+  输出逐 token 一致，但都更慢。Flash 尤其明显：只有某个 rank 的 token 数恰好等于捕获的
+  gear 时才入图，并发流量几乎不可能命中。
+- **Flash 用 `fast` 放弃的不是末几位小数，而是并发 32 下的可复现性**：`strict` 下
+  100% 的请求对可复现，`fast` 下只有 38~42%，首个分歧出现在第 4 个 token。
+
+**没有实测所以不在表内**：overlap、query chunking、query coalescing、partial commit。
+在有人真正跑过之前，这些按「不支持」对待。
+
 ### 脚本配置示例
 
 | 配置项 | Nano | Flash |
@@ -73,7 +187,13 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling 后端 | Triton / PyTorch | Triton / PyTorch |
 | 保留流式会话 KV | 关闭 | 开启 |
 
-两个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。默认启用每次 forward 内跨记忆层复用的 metadata 缓存。Nano ordinary reader 与 slot reader 共用以 CUDA stream 为键的有界 LRU，在跨层、跨 forward 时复用不可变的 query geometry。该缓存独立于 `MEMT_EXPERIMENT_METADATA_CACHE`，后者控制一次 forward 内的 token/slot 元数据复用；query geometry 不缓存请求 ID、实时 state-slot ID、记忆内容或层参数。Slot read 与 prefill/decode CUDA Graph 均需显式开启，不兼容的 batch 回退 eager。这些值是部署示例，额外的 SGLang 原生参数仍须通过启动校验。
+两个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。默认启用每次 forward 内跨层复用的 metadata 缓存。Nano 只读查询（包括默认 packed 路径）复用同一 CUDA stream 上不可变的 query plan，实时 state-slot ID 仍逐次 forward 更新。Flash grouped K/V normalization 复用 GPU epsilon 常量，保留原 FP32 精度（FP64 输入使用 FP64）。slot read 和 prefill/decode CUDA Graph 按下述环境变量显式开启。CUDA Graph 未命中兼容形状时回退 eager。这些值是部署示例，不是固定的并行度要求；额外的 SGLang 原生参数可以覆盖脚本值，但仍须通过下述启动检查。
+
+实测范围、数值检查及剩余实现开销见[推理优化与算法成本边界](docs/optimization_boundaries_zh.md)。
+
+各阶段时间占比、profiler 扰动与后续优化优先级见[推理阶段 Profiling 分析](docs/phase_profile_analysis_zh.md)。
+
+编译器融合、实时 slot graph 接入与验收见[编译与 Decode CUDA Graph](docs/compile_decode_graph_zh.md)；[性能基准工具](benchmarks/memory_decode_graph/README.md)保留请求原始计时。
 
 ### Launcher 参数
 
@@ -114,14 +234,17 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | 默认 `1`，在一次 forward 内跨记忆层复用 token/slot 元数据；设为 `0` 关闭。 |
 | `MEMT_EXPERIMENT_SLOT_READ` | 设为 `1` 启用按 slot 直接读取，默认 `0`。 |
-| `MEMT_EXPERIMENT_PREFILL_GRAPH` | 设为 `1` 显式开启 prefill graph，默认 `0`。Nano 支持 native capture gear padding，同时保留有效 token 数和实时请求区间；Flash 须满足下文的显式配置与本地 gear 精确匹配检查。 |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Nano 可设为 `1` 启用 token 数精确匹配的 prefill graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | 设为 `1` 启用 decode graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | 设为 `1` 启用保留精度转换的 Nano 输出归一化融合和启动预热，默认 `0`；Flash 保留原有编译函数。 |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | 设为 `1` 将只读 memory 纳入 breakable decode graph；依赖 slot read，拒绝 overlap/PDMux，默认 `0`。 |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | 设为 `1` 复用 eager writer 的不可变几何元数据；缓存有界、按 stream 隔离，不含会话或状态内容，默认 `0`；不支持 commit graph capture。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 分别设为 `1` 启用对应阶段的 native overlap，默认均为 `0`；commit 边界同步。 |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | 设为 `1` 允许 query chunk，并显式传入 `--chunked-prefill-size`；解析后每 rank 预算须 ≥2048，默认 `0`。完整 commit 仍一次 forward 执行，可超过 query 预算。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲边界主动等待上限，单位 ms，默认 `0`（关闭），启用时须在 `(0, 10]`；只支持 Nano TP2 或 Flash TP=DP=EP4/8。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 达到任一阈值立即放行；启用等待时默认为 4 请求／4096 输入 tokens，非 batch 上限。 |
 
-例如，启用 Nano 的组合特性：
+例如，启用 Nano 的四项优化：
 
 ```bash
 MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
@@ -129,11 +252,7 @@ MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
 sh start_memt_nano.sh /models/MemT-1.0-Nano
 ```
 
-可用 `--cuda-graph-config` 指定需要捕获的 batch/token 形状。Flash 在固定的 PyTorch 2.11.0 / SGLang 0.5.16 环境中支持显式请求实验性 prefill 与 decode graph。Prefill 实验要求 TP4 / DP4 / EP4、PP1、DP attention、A2A `none`、关闭 overlap、未量化 BF16 权重，并通过固定版本的 native 兼容性检查；这与上面的 TP8 脚本示例不同。请求 prefill graph 时，capture gears 默认为 `[512, 1024]`；`[512, 1024, 4096]` 须显式选择。Prefill replay 还要求四个 rank 的原始 token 数均非零且相等，每个 rank 的实际 token 数精确匹配已捕获的本地 gear，元数据兼容且所有 rank 达成一致。Idle、uneven 或未匹配的 batch 回退 eager。两阶段 graph 均默认关闭；capture 成功本身不代表实际 replay 或数值验收完成。专项 GPU 验证已覆盖四个 rank 的本地 gear 512、1024、4096，以及 idle、uneven prefill 的 eager 回退。这些检查不代表 batch invariance；验证结果和限制见下文。
-
-所有 MemT memory blocks 始终以 eager 执行，包括 breakable graph replay 期间。Eager/opt-in 对照是组合特性对照：eager 使用 metadata cache `0`、slot read `0` 且关闭两阶段 graph；opt-in 组合显式开启 metadata cache、slot read 与两阶段 graph。Nano 两种配置中的 ordinary reader 和 slot reader 仍共用不可变 query geometry LRU；Flash 的普通与 slot read 共用单 token reader 快路径。
-
-客户端并发数（包括 c32）不能证明实际为 BS32，也不能确定每个 rank 的 token 数。实际观测已确认，相对单请求执行存在随 batch shape 变化的数值漂移；相同实际 batch 下 graph/eager 一致，不代表 batch invariance。BS32 与 deterministic communication 均不保证不同 batch 组合的 logits 完全相同。
+可用 `--cuda-graph-config` 指定需要捕获的 batch/token 形状。Flash 的实验配置启用 metadata、slot read 和 decode graph，prefill graph 保持关闭；历史严格 logits 对比未通过，不应视为已完成数值验收。
 
 Overlap 与 query chunk 是供社区按负载选择的实验功能，默认关闭，不保证性能正收益。两阶段 overlap 可独立开启；query chunk 改变 native KV prefill 分组，不改变 query 读取的已发布 memory state。完整 commit 不拆分：已有 prefill 时延后；空 prefill 可执行超过 query chunk 预算的完整 commit，仍受 native KV／SWA 容量限制。Flash DP attention 会将 CLI chunk 预算除以 DP 度数，identity 中 `execution.query_chunk_per_rank` 记录解析后的每 rank 值。
 
@@ -143,71 +262,6 @@ sh start_memt_nano.sh /models/MemT-1.0-Nano --chunked-prefill-size 8192
 ```
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
-
-### 验证设置与限制
-
-Nano 使用的测试 checkpoint 为 `MemT-2.0-35B-A3B_2610161130`，这些数字不代表单独发布的 MemT-1.0-Nano 权重。Flash 使用 MemT-1.0-Flash。测试使用 B300 SXM6 AC GPU、BF16 权重、PyTorch 2.11.0+cu130 与 SGLang 0.5.16。Nano 为两卡 TP2/DP1/EP1；Flash 为四卡 TP4/DP4/EP4、attention TP1、FP8 E4M3 KV。两者均为 PP1、A2A `none`。
-
-Eager 将 metadata reuse、slot read 设为 `0`，关闭两阶段 graph；best 指显式启用的组合配置，开启这两项并请求 breakable prefill/decode graph。Nano 的 immutable query-geometry LRU 为两组及 ordinary/slot 路径共有；Flash 的单 token reader 快路径也由普通与 slot 路径共用。Nano prefill gears 为 `[512,1024,2048,4096,8192,16384]`，decode 为 `[1,2,4,8,16,32]`；Flash 分别为 `[512,1024,4096]` 和 `[1,2,4,8]`。两者的 server 参数均为 `max_total_tokens=131072`、`max_running_requests=32`、`max_prefill_tokens=16384`、`context_length=32768`，每 rank 40 个 session 与两个进行中的 commit。Nano/Flash static memory fraction 分别为 0.6/0.8。通信设置为 `NCCL_ALGO=allreduce:tree`，关闭 custom all-reduce 和 FlashInfer all-reduce fusion；这不等同于 native 全流程 deterministic inference。
-
-精度每模型共 64 个案例：16 个真实问题和 16 种边界输入长度，各覆盖空／非空 memory。非空 QA memory 在各模型内部使用同一份完整选定对话历史（Nano 15188 tokens；Flash 14686 tokens）。所有 candidate 沿用本模型新采集的 eager-BS1 输出前缀，采集 128 个输出位置。Relative L2 对每个完整词表向量分别计算 `||candidate - golden||₂ / ||golden||₂`，再对全部位置取平均；Pearson 同样逐向量计算后平均。前 32／128 个位置的统计包含全部向量，包括超限位置。实际 BS32 与客户端并发数分别核验；内部另保留 eager-BS32、BS1 重复、slot 关闭及历史主干对照。Slot-off 仅关闭直接 slot read，仍使用 memory。
-
-本轮 Flash QA64 的所有 prefill 均回退 eager，graph 组的 decode 实际使用 graph；512/1024/4096 local gear 的 prefill replay 来自独立 Flash prefill replay/fallback 专项验证，不属于本精度表的 QA64 覆盖范围。
-
-| 模型／配置 | 前32位置平均 relative L2 | 前32位置平均 Pearson | 前128位置平均 relative L2 | 前128位置平均 Pearson |
-| --- | ---: | ---: | ---: | ---: |
-| Nano eager BS1 (golden) | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
-| Nano best BS1 | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
-| Nano best BS32 | 0.049405459 | 0.996819092 | 0.056124086 | 0.995009996 |
-| Flash eager BS1 (golden) | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
-| Flash best BS1 | 0.000000000 | 1.000000000 | 0.000000000 | 1.000000000 |
-| Flash best BS32 | 0.048546978 | 0.997824768 | 0.051201860 | 0.996930751 |
-
-两模型 BS32 相对各自 eager-BS1 golden 均未通过逐位置 relative L2 < 0.04、Pearson ≥ 0.999 的原数值标准。在本 QA64 矩阵中，相同实际 batch 下的 best、slot-off 与 eager 逐位一致；相同的 batch-shape drift 已存在于 eager。制品验证通过不等于 BS32 数值验收通过。
-
-Nano padding 另以空／非空 memory 验证了 511/512/513 tokens 与混合长度 BS2/BS3 batch。实际 graph 准入分别使用 512/512/1024 档，混合 batch 覆盖 512/1024/2048 档。两轮验证中，MemT 与同权重纯 backbone 分别通过同 batch eager/graph 一致性及跨轮重复性检查，每个模型合计 17,408 次完整词表向量比较均逐位一致；这不代表 batch invariance。Nano 保留 native 最大 2× padding 倍率：最小 gear 为 512 时，不足 256 tokens 正常回退。
-
-独立 Flash 专项验证覆盖四个 rank 均衡时的本地 gear 512/1024/4096 prefill replay，以及 idle/uneven batch 的 eager 回退。全部 96 个 prefill 向量与同 batch eager 参考逐位一致；uneven batch 的 decode 保留微小差异（最大 relative L2 0.000250868、最小 Pearson 0.999999919），满足专项诊断阈值。这不把 QA64 表的结论扩大到未覆盖的执行形状。
-
-### 客户端延迟
-
-硬件、checkpoint、并行配置、graph gears 与容量参数沿用上方验证设置。Nano 使用 BF16 KV、FP32 Mamba state，attention/linear attention 后端均为 Triton；Flash 使用 FP8 E4M3 KV 和 dsv4 attention。两者采用 `moe_runner_backend=triton`、`sampling_backend=pytorch`、`tc_compiler=eager` 和 FCFS，禁用 radix cache，开启 streaming session，stream interval 为 1 token。传入的 scheduling conservativeness 为 1.0，Flash DP attention 原生解析后为 0.3，Nano 仍为 1.0。采样 temperature=0；Nano/Flash seed 分别为 20261020/511801400。
-
-每个 query 输入 512 tokens，使用 native EOS，最多输出 256 tokens。空／非空 memory 分别测量；非空性能 memory 由一次 2048-token commit 生成，在计时前导入全新 session，与完整历史精度 workload 不同。状态准备、session 创建和 import 不计入 query 延迟。Overlap、query chunking、coalescing 和诊断 instrumentation 均关闭。
-
-每个条件在客户端并发 1 时先顺序预热 4 请求，并发 32 时先执行两波各 32 个全新 session 的预热；随后各执行 3 轮、每轮 32 个正式请求，保留全部正式请求及异常值。客户端并发不等于实际物理 batch。全矩阵合计 544 个预热请求、1536 个正式请求。
-
-表中延迟单位为毫秒，取每条件 96 个正式请求的算术平均。TTFT 从提交计至首个有效 token。每请求 TPOT 为首个至最后一个有效 token 的时间差除以实际输出 token 数减一，再跨请求取平均；终帧新增 token 计入，重复终帧 token 与 DONE 等待不延长 TPOT。Native EOS 可在 256 tokens 前结束，因此同时报告实际输出长度；输出不足两 token 时 TPOT 未定义。
-
-Flash best 同时请求 prefill 与 decode graph。已核实启动 capture 及独立 replay/fallback 专项诊断，正式计时不采集逐 forward graph 计数。单请求使其他 DP rank 空闲，因此 prefill 回退；并发 32 时准入取决于原生调度，本轮未测量其 replay/fallback 频率。结果属于组合特性对照，不是单独 graph 消融。
-
-**Nano**
-
-| 配置 | 客户端并发 | Memory | 实际输出 tokens（最小 / 均值 / 最大） | 平均 TTFT（ms） | 平均 TPOT（ms） |
-| --- | ---: | --- | ---: | ---: | ---: |
-| eager | 1 | 空 | 79 / 79.00 / 79 | 80.79 | 64.12 |
-| eager | 1 | 非空 | 134 / 134.00 / 134 | 81.32 | 64.53 |
-| eager | 32 | 空 | 103 / 103.00 / 103 | 221.08 | 70.18 |
-| eager | 32 | 非空 | 141 / 141.00 / 141 | 314.74 | 68.98 |
-| best | 1 | 空 | 79 / 79.00 / 79 | 34.82 | 7.50 |
-| best | 1 | 非空 | 134 / 134.00 / 134 | 35.14 | 7.40 |
-| best | 32 | 空 | 79 / 102.75 / 103 | 263.02 | 9.71 |
-| best | 32 | 非空 | 112 / 140.70 / 141 | 207.50 | 10.29 |
-
-**Flash**
-
-| 配置 | 客户端并发 | Memory | 实际输出 tokens（最小 / 均值 / 最大） | 平均 TTFT（ms） | 平均 TPOT（ms） |
-| --- | ---: | --- | ---: | ---: | ---: |
-| eager | 1 | 空 | 256 / 256.00 / 256 | 140.99 | 120.77 |
-| eager | 1 | 非空 | 50 / 204.50 / 256 | 140.46 | 120.81 |
-| eager | 32 | 空 | 256 / 256.00 / 256 | 644.96 | 122.85 |
-| eager | 32 | 非空 | 14 / 193.05 / 256 | 581.56 | 125.03 |
-| best | 1 | 空 | 256 / 256.00 / 256 | 149.58 | 30.13 |
-| best | 1 | 非空 | 50 / 204.50 / 256 | 151.67 | 30.79 |
-| best | 32 | 空 | 256 / 256.00 / 256 | 563.41 | 36.91 |
-| best | 32 | 非空 | 14 / 153.12 / 256 | 635.25 | 38.55 |
-
-全部正式请求均至少输出两个 token，表中 TPOT 均有定义。本矩阵中 best 的 TPOT 更低，但 TTFT 并非每个条件都改善。使用 native EOS 与原生调度的部分并发 32 对照中，实际输出长度不同；这些数字是端到端 workload 测量，不能表述为固定输出长度或单独 graph 的加速比。三轮正式结果及其异常值全部保留。 并发 32 下，Nano eager/非空的三轮平均 TTFT 为 203.09/211.71/529.43 ms，Nano best/空为 210.45/200.87/377.73 ms。后轮升高已计入汇总，计时数据不足以判断其原因。
 
 ## Python 客户端
 

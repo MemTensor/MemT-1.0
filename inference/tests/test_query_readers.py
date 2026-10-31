@@ -102,6 +102,9 @@ def cpu_modules(monkeypatch):
         resolve_head_expansion=lambda: tensor_ops.expand_head_projections,
         resolve_stable_qk=lambda: tensor_ops.prepare_stable_qk,
         resolve_gated_rms_norm=lambda: tensor_ops._gated_rms_norm,
+        grouped_epsilon=lambda values, latent: tensor_ops._epsilon_buffer(
+            tuple(values), latent.dtype, None
+        ) if False else tuple(float(x) for x in values),
     )
     nano = load_source("models/qwen/layer.py")
     flash = load_source("models/deepseek/layer.py")
