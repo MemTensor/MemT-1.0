@@ -612,11 +612,13 @@ The arms really do differ — verified from the server log, not assumed:
 
 Logits are stored as float32 (storing bf16 would quantise away the very difference being measured), compared over the full 129,280-token vocabulary.
 
-| Metric | bs=1 (118 steps) | bs=32 (4 DP ranks × 128 steps) |
+| Metric | bs=1 (1 session × 128 steps) | bs=32 (32 sessions × 128 steps) |
 | --- | --- | --- |
-| L2 relative error `‖on−off‖₂/‖off‖₂` | **0.000e+00** (max 0) | **0.000e+00** on every rank |
-| Pearson correlation | **1.000000** (min 1.0) | **1.000000** on every rank |
-| top-1 agreement | **118/118** | **128/128** per rank |
+| L2 relative error `‖on−off‖₂/‖off‖₂` | **0.000e+00** (max 0) | **0.000e+00** (max 0) |
+| Pearson correlation | **1.000000** (min 1.0) | **1.000000** (min 1.0) |
+| top-1 agreement | **128/128** | **4096/4096** |
+
+*Corrected 2026-11-01.* An earlier version of this table reported bs=32 as "4 DP ranks × 128 steps". The capture probe keyed rows by the first field of the request id, which is the constant `memt`, so all sessions on a rank shared one bucket and the comparison covered only the first 16 steps of the 32 sessions. The probe now keys by session; the numbers above are a re-measurement covering all 32 sessions for the full 128 steps, and bs=1 now covers 128 steps instead of 118. The conclusion (bit-identical) is unchanged; its coverage is now what the table says.
 
 `0` here means **bit-identical**, not "a small error". That is the expected result: same weights, same inputs, same deterministic path — the graph only changes the launch schedule.
 
