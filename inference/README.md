@@ -593,6 +593,51 @@ Snapshots are server-side `.safetensors` files under `--state-directory`. Each m
 
 Metadata contains `format=memt-memory-v1` and `identity=<HF Session identity>`. The identity covers backbone configuration, memory configuration, native encoding, chat template and tokenizer vocabulary. Initialized files contain `memory.<layer>` FP32 tensors with shape `[1, heads, K, V]`; empty HF memories contain no tensors. Identity, layer set, dtype and shape are checked before import. Transfer the file into the server's `--state-directory` to load an HF snapshot by name; server exports can be loaded by HF with the same model/tokenizer. Older SGLang files using `memory.layers.<layer>` and `model`/`encoding` metadata are incompatible with this format. Snapshots contain published memory only, without the conversation transcript or native KV cache.
 
+## Numeric verification
+
+The memory decode graph changes **when** the memory-read kernels are launched, not **what** they compute. That claim was measured rather than asserted.
+
+### Setup
+
+Two arms, same tree, same frozen memory snapshot, same prompt, greedy decoding. The only difference is `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH`. All five replay-consistency switches listed above are set in **both** arms, so the comparison isolates the graph and does not mix in the stable-top-k cost.
+
+The arms really do differ — verified from the server log, not assumed:
+
+| | graph off | graph on |
+| --- | --- | --- |
+| `Capture target decode CUDA graph` lines | 0 | 8 |
+| `graph segments=[...]` | none | 6 captures, **all `[1]`** (single-segment) |
+
+### Next-token logits, first 128 decode steps
+
+Logits are stored as float32 (storing bf16 would quantise away the very difference being measured), compared over the full 129,280-token vocabulary.
+
+| Metric | bs=1 (118 steps) | bs=32 (4 DP ranks × 128 steps) |
+| --- | --- | --- |
+| L2 relative error `‖on−off‖₂/‖off‖₂` | **0.000e+00** (max 0) | **0.000e+00** on every rank |
+| Pearson correlation | **1.000000** (min 1.0) | **1.000000** on every rank |
+| top-1 agreement | **118/118** | **128/128** per rank |
+
+`0` here means **bit-identical**, not "a small error". That is the expected result: same weights, same inputs, same deterministic path — the graph only changes the launch schedule.
+
+Boundaries worth stating explicitly: this covers bs=1 and bs=32 buckets on Flash, decode only. The other buckets are separate graphs and were not compared one by one (their capture logs are `segments=[1]` as well). Nano uses a different graph implementation and was not measured.
+
+### LocoMo, end to end
+
+The evaluation chain originally drove vLLM; only the engine was replaced, and the artefacts handed to the official offline scorer are unchanged in format, so the scorer runs as-is.
+
+| | graph off | graph on |
+| --- | --- | --- |
+| Instances | 1540 / 1540 | 1540 / 1540 |
+| **Aggregate category score** | **2.9714** | **2.9714** |
+| Aggregate F1 | 0.26042 | 0.25987 |
+| Output quality gate | passed | passed |
+
+The category score is identical to every printed digit. F1 differs by 5.5e-4 (0.21%) — that is a difference in the generated text of a 512-token-per-answer evaluation, not a short-range numeric divergence, since the 128-step logits above are bit-identical. Both arms hit the token limit on exactly 1 of 1540 questions, so neither is truncated-dominated.
+
+**Upstream defect found while running this.** With `--enable-deterministic-inference`, SGLang picks the sampling path for the whole *step* (`is_all_greedy = all(top_k <= 1 for r in reqs)`). A commit request generates nothing but still carries sampling parameters; if it keeps the server defaults it makes any step that mixes a commit with a query non-greedy, and the non-greedy gumbel path asserts `seed.shape == positions.shape` in `murmur_hash32` and kills the scheduler. Workaround here: commits use the same greedy parameters. This is upstream behaviour, not something these patches introduce, and it is worth reporting there.
+
+
 ## Licensing
 
 Original package code is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Bundled third-party code retains its original license and copyright notices:

@@ -577,6 +577,51 @@ Nano 将骨干配置放在 `backbone_configs` 中，使用 `model_type: "qwen3_5
 
 元数据包含 `format=memt-memory-v1` 和 `identity=<HF Session identity>`；身份覆盖骨干配置、记忆配置、原生编码、聊天模板和 tokenizer 词表。已初始化文件使用 `memory.<layer>` 键、FP32 类型和 `[1, heads, K, V]` 形状；空 HF 记忆不包含张量。导入前检查身份、层集合、类型和形状。将 HF 文件传入服务端 `--state-directory` 后可按文件名加载；服务端导出文件也可由相同模型/tokenizer 的 HF Session 加载。旧 SGLang 的 `memory.layers.<layer>` 及 `model`/`encoding` 元数据格式与此格式不兼容。快照只包含已发布记忆，不包含对话记录或原生 KV cache。
 
+## 数值验证
+
+记忆解码图改变的是记忆读取 kernel **何时发射**，不是**算什么**。这一点是测出来的，不是声称的。
+
+### 设置
+
+两臂同树、同冻结记忆快照、同 prompt、greedy 解码。唯一差别是 `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH`。上文列出的五个回放一致性开关**两臂都设**，所以对比隔离的是图本身，没有混入稳定 top-k 的开销。
+
+两臂确实不同——这是从服务端日志核实的，不是假设：
+
+| | 图关 | 图开 |
+| --- | --- | --- |
+| `Capture target decode CUDA graph` 行数 | 0 | 8 |
+| `graph segments=[...]` | 无 | 6 次捕获，**全部 `[1]`**（单段） |
+
+### 前 128 个 decode step 的 next-token logits
+
+logits 以 float32 存储（用 bf16 存会把要测的差异本身量化掉），在完整的 129,280 词表上比较。
+
+| 指标 | bs=1（118 步） | bs=32（4 个 DP rank × 128 步） |
+| --- | --- | --- |
+| L2 相对误差 `‖on−off‖₂/‖off‖₂` | **0.000e+00**（最大 0） | 每个 rank **0.000e+00** |
+| Pearson 相关系数 | **1.000000**（最小 1.0） | 每个 rank **1.000000** |
+| top-1 一致 | **118/118** | 每 rank **128/128** |
+
+这里的 `0` 是**逐位相同**，不是"误差很小"。这是应有结果：同权重、同输入、同确定性路径——图只改变发射调度。
+
+边界写明：本项覆盖 Flash 的 bs=1 与 bs=32 两个 bucket，只覆盖 decode。其余 bucket 是各自独立的图，未逐一对比（其捕获日志同样是 `segments=[1]`）。Nano 的图是另一套实现，未测。
+
+### LocoMo 端到端
+
+原评测链驱动 vLLM；本次只换引擎，交给官方离线打分器的产物格式不变，因此打分器原样运行。
+
+| | 图关 | 图开 |
+| --- | --- | --- |
+| 实例数 | 1540 / 1540 | 1540 / 1540 |
+| **聚合类别分** | **2.9714** | **2.9714** |
+| 聚合 F1 | 0.26042 | 0.25987 |
+| 输出质量门 | passed | passed |
+
+类别分逐位相同。F1 差 5.5e-4（0.21%）——这是"每答案最多 512 token"的生成文本差异，不是短程数值分叉，因为上面 128 步 logits 是逐位相同的。两臂都恰好有 1/1540 道题触到长度上限，说明都没有被截断主导。
+
+**跑这套评测时发现的上游缺陷。** 开 `--enable-deterministic-inference` 时，SGLang 按**整个 step** 决定采样路径（`is_all_greedy = all(top_k <= 1 for r in reqs)`）。commit 请求不生成 token，但仍携带采样参数；若它保留服务端默认值，任何"commit + query"混合的 step 都会变成非 greedy，而非 greedy 的 gumbel 路径在 `murmur_hash32` 里断言 `seed.shape == positions.shape`，直接打死调度器。本包的规避方式：commit 也使用 greedy 参数。这是上游行为，不是这些补丁引入的，值得反馈给上游。
+
+
 ## 许可证
 
 本包原创代码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。随包提供的第三方代码保留原有许可证和版权声明：
