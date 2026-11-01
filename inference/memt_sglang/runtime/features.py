@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import replace
+from importlib import import_module
 
 
 def enabled(name, *, environment=None):
@@ -63,7 +64,10 @@ def numerics_tier(*, environment=None, args=None, model=None):
     )
     if model == "memt-nano" or (model is None and not requested):
         return "strict" if flag else "fast"
-    if flag and len(requested) == len(STRICT_NUMERICS_SWITCHES):
+    stable_selection = model != "memt-flash" or enabled(
+        "C4_STABLE_TOPK", environment=environment
+    )
+    if flag and len(requested) == len(STRICT_NUMERICS_SWITCHES) and stable_selection:
         return "strict"
     return "custom" if requested or flag else "fast"
 
@@ -106,6 +110,10 @@ def validate_numerics_tier(args, *, environment=None, model=None):
     if tier == "strict":
         switches = () if model == "memt-nano" else STRICT_NUMERICS_SWITCHES
         missing = [name for name in switches if name not in requested]
+        if model == "memt-flash" and not enabled(
+            "C4_STABLE_TOPK", environment=environment
+        ):
+            missing.append("MEMT_EXPERIMENT_C4_STABLE_TOPK")
         if missing or not flag:
             raise ValueError(
                 "MEMT_NUMERICS=strict requires --enable-deterministic-inference"
@@ -131,7 +139,6 @@ def validate_flash_decode_graph(args):
     # treats an absent switch as its default, so a misspelt one is otherwise
     # indistinguishable from one the operator never set.
     required = (
-        ("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1"),
         ("MEMT_EXPERIMENT_PADDED_DECODE_QUERY", "1"),
         # The supplied overlay retains captured tensors independently of the
         # optional deterministic arithmetic profile.
@@ -157,6 +164,13 @@ def validate_flash_decode_graph(args):
                 else "",
             )
         )
+
+
+def require_flash_capture_owners():
+    """Check the native lifetime API independently of top-k selection policy."""
+    native = import_module("sglang.srt.models.deepseek_v4")
+    if getattr(native, "DSV4_DECODE_OWNERS_API_VERSION", None) != 1:
+        raise ValueError("Flash graph requires captured tensor ownership API v1")
 
 
 def validate_native_kv_capacity(actual, requested):

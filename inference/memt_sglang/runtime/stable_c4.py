@@ -11,8 +11,6 @@ import os
 from functools import wraps
 from importlib import import_module
 
-from memt_sglang.runtime.features import enabled
-
 # The overlay ships exactly one kernel width, and the width appears in the
 # symbol name as well as in the check. Deriving the name from the constant keeps
 # them from drifting apart when the overlay gains another width.
@@ -29,14 +27,6 @@ QUALIFIED_CAPABILITIES = ((10, 3),)
 
 # Optional operator allowlist. Unset accepts devices supported by the kernel.
 ARCH_OVERRIDE_VARIABLE = "MEMT_STABLE_C4_ARCH"
-
-# Overlay-provided API version marks. The overlay is a separate deliverable
-# from this package, so every capability is probed by an explicit version
-# constant rather than by hasattr(): a missing constant means "this overlay
-# predates the API", which must stop startup instead of degrading silently.
-_GRAPH_PROFILE_MARKS = (
-    ("sglang.srt.models.deepseek_v4", "DSV4_DECODE_OWNERS_API_VERSION"),
-)
 
 
 def _format_capability(capability):
@@ -136,15 +126,6 @@ def install(config):
             "C4_STABLE_TOPK requires the separately supplied SGLang stable exact "
             f"top-k API v{STABLE_TOPK_API_VERSION}"
         )
-
-    # The graph requires captured tensor ownership support. Optional arithmetic
-    # profiles are deliberately absent from this capability check.
-    if enabled("MEMORY_DECODE_GRAPH"):
-        for module, attribute in _GRAPH_PROFILE_MARKS:
-            if getattr(import_module(module), attribute, None) != 1:
-                raise ValueError(
-                    "Flash graph requires captured tensor ownership API v1"
-                )
 
     indexer = import_module("sglang.srt.layers.attention.dsv4.indexer")
     if getattr(indexer, "_memt_c4_stable_topk", False):

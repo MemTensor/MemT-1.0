@@ -193,8 +193,7 @@ class CoalescingTest(unittest.TestCase):
         with patch.dict(
             m.os.environ, {m.PREFIX + "MS": "0", m.PREFIX + "REQUESTS": "4"}, clear=True
         ):
-            with self.assertRaises(ValueError):
-                m.config_from_env()
+            self.assertIsNone(m.config_from_env())
 
     def test_dp_global_release_and_busy_rank(self):
         cfg = m.CoalescingConfig(5)
@@ -339,7 +338,7 @@ class CoalescingConfigurationTests(unittest.TestCase):
         for kwargs in (
             {"wait_ms": float("nan")},
             {"wait_ms": 0},
-            {"wait_ms": 1, "target_requests": 1},
+            {"wait_ms": 1, "target_requests": 0},
             {"wait_ms": 1, "target_tokens": 0},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -357,3 +356,8 @@ class CoalescingConfigurationTests(unittest.TestCase):
                 self.assertEqual(
                     original.call(scheduler), (None, scheduler.running_batch)
                 )
+
+
+def test_single_request_target_releases_immediately():
+    policy = m.QueryCoalescer(m.CoalescingConfig(5, target_requests=1))
+    assert policy.decide([("a", 512)], 1)["reason"] == "request_target"

@@ -77,3 +77,11 @@ def test_native_true_spelling_is_not_rejected(monkeypatch):
         monkeypatch.setenv("MEMT_EXPERIMENT_" + name, "1")
     monkeypatch.setenv("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "TRUE")
     validate_flash_decode_graph(SimpleNamespace(speculative_skip_dp_mlp_sync=False))
+
+
+def test_native_topk_is_an_explicit_operator_choice(monkeypatch):
+    monkeypatch.setenv("MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH", "1")
+    monkeypatch.setenv("MEMT_EXPERIMENT_C4_STABLE_TOPK", "0")
+    monkeypatch.setenv("MEMT_EXPERIMENT_PADDED_DECODE_QUERY", "1")
+    monkeypatch.setenv("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1")
+    validate_flash_decode_graph(SimpleNamespace(speculative_skip_dp_mlp_sync=False))

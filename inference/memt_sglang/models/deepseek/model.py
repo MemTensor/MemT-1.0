@@ -18,8 +18,8 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
         from memt_sglang.runtime.features import enabled
 
         if enabled("C4_STABLE_TOPK"):
-            # The old canonical-order module was removed upstream; the stable
-            # dispatch is what keeps capture/replay top-k tie-breaking identical.
+            # Stable selection is an optional reference policy. Native top-k
+            # remains usable with capture when the operator selects it.
             from memt_sglang.runtime.stable_c4 import STABLE_TOPK_WIDTH
             from memt_sglang.runtime.stable_c4 import install as install_stable_c4
 
@@ -33,12 +33,22 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
         if enabled("MEMORY_DECODE_GRAPH"):
             from sglang.srt.runtime_context import get_server_args
 
-            from memt_sglang.runtime.features import validate_flash_decode_graph
+            from memt_sglang.runtime.features import (
+                require_flash_capture_owners,
+                validate_flash_decode_graph,
+            )
 
             validate_flash_decode_graph(get_server_args())
+            require_flash_capture_owners()
         self._memory_config = config.memory_config
         self._memory_loaded = False
         super().__init__(config, quant_config=quant_config, prefix=prefix)
+        if enabled("MEMORY_DECODE_GRAPH") and not getattr(
+            self.model, "_pin_decode_graph_owners", False
+        ):
+            raise ValueError(
+                "Flash graph tensor ownership is disabled in the native model"
+            )
         self.memt_state_shapes = self._memory_config.state_shapes
 
     def load_weights(self, weights, is_nextn=False):

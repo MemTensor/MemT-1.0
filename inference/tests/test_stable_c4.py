@@ -7,12 +7,12 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from memt_sglang.runtime import stable_c4
+from memt_sglang.runtime import features, stable_c4
 from memt_sglang.runtime.features import validate_flash_decode_graph
 
 
 class StableC4Tests(unittest.TestCase):
-    def test_graph_requires_all_profile_components(self):
+    def test_graph_requires_geometry_and_ownership_independently_of_arithmetic(self):
         with patch.dict(
             os.environ,
             {
@@ -34,8 +34,7 @@ class StableC4Tests(unittest.TestCase):
             validate_flash_decode_graph(NS(enable_deterministic_inference=True))
             validate_flash_decode_graph(NS(enable_deterministic_inference=False))
             with patch.dict(os.environ, {"MEMT_EXPERIMENT_C4_STABLE_TOPK": "0"}):
-                with self.assertRaises(ValueError):
-                    validate_flash_decode_graph(NS(enable_deterministic_inference=True))
+                validate_flash_decode_graph(NS(enable_deterministic_inference=True))
             # Only replay-consistency switches remain in this gate. The DSV4
             # profile switches (e.g. MOE_COMBINE_FP32) moved to the numerics tier
             # and are asserted by test_numerics_tier instead.
@@ -49,24 +48,14 @@ class StableC4Tests(unittest.TestCase):
                             NS(enable_deterministic_inference=True)
                         )
 
-    def test_partial_backend_profile_is_rejected(self):
-        torch = NS(
-            cuda=NS(is_available=lambda: True, get_device_capability=lambda: (10, 3))
-        )
-        native = NS(
-            STABLE_EXACT_TOPK_API_VERSION=1, topk_transform_512_stable=lambda *a: None
-        )
-        with (
-            patch.dict(sys.modules, {"torch": torch}),
-            patch.dict(os.environ, {"MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH": "1"}),
-            patch.object(
-                stable_c4,
-                "import_module",
-                side_effect=lambda name: native if name.endswith(".topk") else NS(),
-            ),
-        ):
+    def test_native_graph_ownership_capability_is_required(self):
+        with patch.object(features, "import_module", return_value=NS()):
             with self.assertRaisesRegex(ValueError, "tensor ownership"):
-                stable_c4.install({"index_topk": 512})
+                features.require_flash_capture_owners()
+        with patch.object(
+            features, "import_module", return_value=NS(DSV4_DECODE_OWNERS_API_VERSION=1)
+        ):
+            features.require_flash_capture_owners()
 
     def test_missing_native_api_is_an_explicit_error(self):
         torch = NS(

@@ -129,3 +129,14 @@ def test_native_false_spelling_does_not_request_strict(monkeypatch):
         monkeypatch.setenv(name, "0" if name.endswith("FIXED_SPLITS") else "false")
     monkeypatch.setenv("MEMT_NUMERICS", "fast")
     assert features.validate_numerics_tier(OFF, model="memt-flash") == "fast"
+
+
+def test_flash_strict_requires_stable_selection_for_its_numeric_promise(monkeypatch):
+    for name, value in PROFILE.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MEMT_NUMERICS", "strict")
+    monkeypatch.setenv("MEMT_EXPERIMENT_C4_STABLE_TOPK", "0")
+    with pytest.raises(ValueError, match="C4_STABLE_TOPK"):
+        features.validate_numerics_tier(ON, model="memt-flash")
+    monkeypatch.setenv("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1")
+    assert features.validate_numerics_tier(ON, model="memt-flash") == "strict"

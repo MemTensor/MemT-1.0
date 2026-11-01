@@ -144,6 +144,7 @@ def prepare(argv):
         if "--enable-deterministic-inference" not in engine:
             engine.append("--enable-deterministic-inference")
         if model == "memt-flash":
+            os.environ.setdefault("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1")
             for name, value in (
                 ("DETERMINISTIC_PROFILE", "1"),
                 ("MHC_FIXED_SPLITS", "64"),

@@ -24,8 +24,8 @@ class CoalescingConfig:
     def __post_init__(self):
         if not math.isfinite(self.wait_ms) or self.wait_ms <= 0:
             raise ValueError("Query coalescing wait must be finite and positive")
-        if type(self.target_requests) is not int or self.target_requests < 2:
-            raise ValueError("Query coalescing request target must be at least 2")
+        if type(self.target_requests) is not int or self.target_requests < 1:
+            raise ValueError("Query coalescing request target must be positive")
         if type(self.target_tokens) is not int or self.target_tokens < 1:
             raise ValueError("Query coalescing token target must be positive")
 
@@ -33,8 +33,6 @@ class CoalescingConfig:
 def config_from_env():
     wait_ms = float(os.environ.get(PREFIX + "MS", "0"))
     if wait_ms == 0:
-        if any(PREFIX + name in os.environ for name in ("REQUESTS", "TOKENS")):
-            raise ValueError("Query coalescing targets require a positive wait")
         return None
     return CoalescingConfig(
         wait_ms,

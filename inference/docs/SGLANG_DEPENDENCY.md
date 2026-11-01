@@ -41,3 +41,10 @@ required in either mode; strict is not needed merely to enable a decode graph.
 When `MEMT_NUMERICS=auto` inherits only part of a Flash arithmetic profile, the
 reported effective tier is `custom`; it carries no batch-invariance claim.
 DeepSeek-specific flags do not change or gate Nano's numerical policy.
+
+The launcher keeps stable C4 as the currently qualified reference default for
+memory graphs. An explicit `MEMT_EXPERIMENT_C4_STABLE_TOPK=0` selects native top-k;
+the adapter does not reject it as a graph-incompatible configuration. Native
+capture ownership is checked independently. Qualification of alternative
+selection policies and their speed/quality tradeoffs is recorded separately;
+CUDA graph replay does not require fixed index values.
