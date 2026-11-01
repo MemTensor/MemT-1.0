@@ -27,11 +27,7 @@ STABLE_TOPK_API_VERSION = 1
 # requirement -- see `_allowed_capabilities`.
 QUALIFIED_CAPABILITIES = ((10, 3),)
 
-# Operator override for the above. This package is deployed on hardware the
-# authors do not have, so a qualification record must not be a wall: without an
-# escape hatch the only way to run on an unlisted part is to patch the source,
-# which is worse than running with a warning. Accepts "any" or a comma list of
-# "major.minor".
+# Optional operator allowlist. Unset accepts devices supported by the kernel.
 ARCH_OVERRIDE_VARIABLE = "MEMT_STABLE_C4_ARCH"
 
 # Overlay-provided API version marks. The overlay is a separate deliverable

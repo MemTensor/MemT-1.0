@@ -127,8 +127,6 @@ def validate_flash_decode_graph(args):
         # The supplied overlay retains captured tensors independently of the
         # optional deterministic arithmetic profile.
         ("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1"),
-        ("SGLANG_OPT_USE_TILELANG_MHC_PRE", "1"),
-        ("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "1"),
     )
     missing = [
         name
