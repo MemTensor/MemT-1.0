@@ -16,7 +16,9 @@ def batch(lengths, prefixes=None):
         batch_size=len(lengths),
         rids=[f"request-{i}" for i in range(len(lengths))],
         input_ids=torch.arange(n),
-        positions=torch.cat([torch.arange(p, p + n) for p, n in zip(prefixes, lengths)]),
+        positions=torch.cat(
+            [torch.arange(p, p + n) for p, n in zip(prefixes, lengths)]
+        ),
         out_cache_loc=torch.arange(1, n + 1),
         extend_seq_lens_cpu=list(lengths),
         extend_prefix_lens_cpu=list(prefixes),
@@ -31,7 +33,9 @@ def runner(monkeypatch):
         capture_num_tokens = [256, 512, 1024, 2048]
 
         def __init__(self):
-            self.model_runner = SimpleNamespace(model=SimpleNamespace(memt_runtime=object()))
+            self.model_runner = SimpleNamespace(
+                model=SimpleNamespace(memt_runtime=object())
+            )
             self.allowed = True
             self.corrupt = False
 
@@ -44,7 +48,9 @@ def runner(monkeypatch):
             result = SimpleNamespace(**vars(live))
             result.input_ids = torch.nn.functional.pad(live.input_ids, (0, gear - n))
             result.positions = torch.nn.functional.pad(live.positions, (0, gear - n))
-            result.out_cache_loc = torch.nn.functional.pad(live.out_cache_loc, (0, gear - n))
+            result.out_cache_loc = torch.nn.functional.pad(
+                live.out_cache_loc, (0, gear - n)
+            )
             result.rids = None
             if self.corrupt:
                 result.extend_seq_lens_cpu = [gear]
@@ -60,7 +66,10 @@ def runner(monkeypatch):
     return Runner()
 
 
-@pytest.mark.parametrize("lengths", [[511], [512], [513], [511, 1], [512, 1], [511, 512], [511, 513], [511, 512, 513]])
+@pytest.mark.parametrize(
+    "lengths",
+    [[511], [512], [513], [511, 1], [512, 1], [511, 512], [511, 513], [511, 512, 513]],
+)
 def test_gear_padding_preserves_live_rows_and_positions(runner, lengths):
     live = batch(lengths)
     assert runner.can_run_graph(live)
@@ -87,13 +96,16 @@ def test_prefix_positions_and_replay_metadata_are_live(runner):
     assert second.rids[0] != b.rids[0]
 
 
-@pytest.mark.parametrize("field,value", [
-    ("extend_seq_lens_cpu", [512]),
-    ("extend_prefix_lens_cpu", [-1]),
-    ("num_token_non_padded_cpu", 510),
-    ("extend_num_tokens", 512),
-    ("batch_size", 2),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("extend_seq_lens_cpu", [512]),
+        ("extend_prefix_lens_cpu", [-1]),
+        ("num_token_non_padded_cpu", 510),
+        ("extend_num_tokens", 512),
+        ("batch_size", 2),
+    ],
+)
 def test_invalid_live_metadata_rejected_before_native_load(runner, field, value):
     live = batch([511])
     setattr(live, field, value)

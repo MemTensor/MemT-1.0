@@ -96,9 +96,15 @@ def prefill_identity(intent, resolved_prefill):
     else:
         status = "resolved_unqualified"
     pending = (
-        "capture_pool_bound", "c4_scratch_lifetime",
-        "dp_collective_padding", "cuda_metadata_state_validation",
-    ) if requested else ()
+        (
+            "capture_pool_bound",
+            "c4_scratch_lifetime",
+            "dp_collective_padding",
+            "cuda_metadata_state_validation",
+        )
+        if requested
+        else ()
+    )
     if requested and resolved_tokens != intent.capture_tokens:
         pending += ("resolved_shapes_changed",)
     return {
@@ -239,7 +245,9 @@ def agree_replay(votes, *, dp_size):
         reasons += ("rank_shape_disagreement",)
     if any(v.bucket is None for v in votes):
         reasons += ("capture_shape_unavailable",)
-    return ReplayAgreement(not reasons, votes[0].bucket if not reasons else None, reasons)
+    return ReplayAgreement(
+        not reasons, votes[0].bucket if not reasons else None, reasons
+    )
 
 
 def restrict_batch(batch, agreement):
@@ -256,7 +264,8 @@ def restrict_batch(batch, agreement):
 # Never install this modified function on ServerArgs or modify its source file.
 _RULE_SOURCE_SHA = "9d5197c492584639519573c9e45f0e23c1147ccb89e2d2abcd2c404e4e875046"
 _EXPERIMENT_RULES = {
-    "DeepSeek-V4 (heavy capture-pool memory pressure)", "DP attention",
+    "DeepSeek-V4 (heavy capture-pool memory pressure)",
+    "DP attention",
 }
 _DSV4_SOURCE_SHA = "57e6a41f005e4f28a12394addb028cb4777b0f05026a8cbcefc0319527f74ea7"
 CAPTURE_TOKEN_GEARS = (512, 1024, 4096)
@@ -269,13 +278,17 @@ def explicit_capture_config(intent):
     validate_capture_request MUST run after resolution and before construction.
     """
     if (
-        intent.requested_backend != "breakable" or intent.dp_size != 4
+        intent.requested_backend != "breakable"
+        or intent.dp_size != 4
         or not intent.capture_tokens
         or not set(intent.capture_tokens) <= set(CAPTURE_TOKEN_GEARS)
     ):
         raise ValueError("Flash capture scope is explicit DP4, 512/1024/4096 only")
-    return {"backend": "breakable", "bs": list(intent.capture_tokens),
-            "max_bs": max(intent.capture_tokens)}
+    return {
+        "backend": "breakable",
+        "bs": list(intent.capture_tokens),
+        "max_bs": max(intent.capture_tokens),
+    }
 
 
 def audited_native_validator(source, namespace):
@@ -286,15 +299,28 @@ def audited_native_validator(source, namespace):
     canonical = textwrap.dedent(source).strip() + "\n"
     digest = hashlib.sha256(canonical.encode()).hexdigest()
     if digest != _RULE_SOURCE_SHA:
-        raise ValueError(f"Flash native rule source changed; review required (sha256={digest})")
+        raise ValueError(
+            f"Flash native rule source changed; review required (sha256={digest})"
+        )
     tree = ast.parse(canonical)
     node = tree.body[0]
-    rule_list = next(n.value for n in node.body if isinstance(n, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == "rules" for t in n.targets))
-    kept = [rule for rule in rule_list.elts if rule.elts[0].value not in _EXPERIMENT_RULES]
+    rule_list = next(
+        n.value
+        for n in node.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "rules" for t in n.targets)
+    )
+    kept = [
+        rule for rule in rule_list.elts if rule.elts[0].value not in _EXPERIMENT_RULES
+    ]
     rule_list.elts = kept
     scope = dict(namespace)
-    exec(compile(ast.fix_missing_locations(tree), "<audited-native-flash-rules>", "exec"), scope)
+    exec(
+        compile(
+            ast.fix_missing_locations(tree), "<audited-native-flash-rules>", "exec"
+        ),
+        scope,
+    )
     return scope[node.name]
 
 
@@ -303,20 +329,36 @@ def _check_capture_scope(args, intent):
     resolved = args._resolved()
     config = args.get_model_config()
     required = {
-        "device": "cuda", "tp_size": 4, "dp_size": 4, "ep_size": 4,
-        "pp_size": 1, "dcp_size": 1, "disable_overlap_schedule": True,
-        "enable_two_batch_overlap": False, "enable_memory_saver": False,
-        "disaggregation_mode": "null", "enable_torch_compile": False,
-        "enable_hierarchical_cache": False, "cpu_offload_gb": 0,
-        "enable_symm_mem": False, "enable_dsa_prefill_context_parallel": False,
-        "enable_prefill_cp": False, "enable_deepseek_v4_fp4_indexer": False,
-        "enable_eplb": False, "debug_cuda_graph": False,
+        "device": "cuda",
+        "tp_size": 4,
+        "dp_size": 4,
+        "ep_size": 4,
+        "pp_size": 1,
+        "dcp_size": 1,
+        "disable_overlap_schedule": True,
+        "enable_two_batch_overlap": False,
+        "enable_memory_saver": False,
+        "disaggregation_mode": "null",
+        "enable_torch_compile": False,
+        "enable_hierarchical_cache": False,
+        "cpu_offload_gb": 0,
+        "enable_symm_mem": False,
+        "enable_dsa_prefill_context_parallel": False,
+        "enable_prefill_cp": False,
+        "enable_deepseek_v4_fp4_indexer": False,
+        "enable_eplb": False,
+        "debug_cuda_graph": False,
     }
-    mismatches = [key for key, value in required.items() if getattr(args, key, None) != value]
+    mismatches = [
+        key for key, value in required.items() if getattr(args, key, None) != value
+    ]
     if (
-        mismatches or config.hf_config.model_type != "memt_deepseek_v4"
-        or config.is_multimodal or not resolved.enable_dp_attention
-        or resolved.attn_cp_size != 1 or resolved.moe_a2a_backend != "none"
+        mismatches
+        or config.hf_config.model_type != "memt_deepseek_v4"
+        or config.is_multimodal
+        or not resolved.enable_dp_attention
+        or resolved.attn_cp_size != 1
+        or resolved.moe_a2a_backend != "none"
         or resolved.quantization is not None
         or args.speculative_algorithm is not None
         or args.expert_distribution_recorder_mode is not None
@@ -335,30 +377,46 @@ def validate_capture_request(args, intent, *, native_validator=None):
     _check_capture_scope(args, intent)
     phase = args.cuda_graph_config.prefill
     locks = getattr(args, "_cuda_graph_config_locked", set())
-    if (phase.backend != "breakable" or tuple(phase.bs or ()) != intent.capture_tokens
+    if (
+        phase.backend != "breakable"
+        or tuple(phase.bs or ()) != intent.capture_tokens
         or phase.max_bs != max(intent.capture_tokens)
-        or not {( "prefill", k) for k in ("backend", "bs", "max_bs")} <= locks):
+        or not {("prefill", k) for k in ("backend", "bs", "max_bs")} <= locks
+    ):
         raise ValueError("Flash requested/resolved capture config or locks differ")
     if native_validator is None:
         method = type(args)._disable_breakable_cudagraph_if_incompatible
-        native_validator = audited_native_validator(inspect.getsource(method), method.__globals__)
+        native_validator = audited_native_validator(
+            inspect.getsource(method), method.__globals__
+        )
     private = copy(args)
     private.cuda_graph_config = copy(args.cuda_graph_config)
     private.cuda_graph_config.prefill = copy(phase)
     native_validator(private)
     if private.cuda_graph_config.prefill.backend != "breakable":
         raise ValueError("Remaining native prefill compatibility veto")
-    return {**prefill_identity(intent, phase), "status": "capture_attempt_permitted",
-            "relaxed_native_rules": sorted(_EXPERIMENT_RULES),
-            "native_rule_source_sha256": _RULE_SOURCE_SHA,
-            "replay_scope": "all DP4 ranks active, equal exact "
-                            + "/".join(map(str, intent.capture_tokens)) + " tokens"}
+    return {
+        **prefill_identity(intent, phase),
+        "status": "capture_attempt_permitted",
+        "relaxed_native_rules": sorted(_EXPERIMENT_RULES),
+        "native_rule_source_sha256": _RULE_SOURCE_SHA,
+        "replay_scope": "all DP4 ranks active, equal exact "
+        + "/".join(map(str, intent.capture_tokens))
+        + " tokens",
+    }
 
 
 CORE_STABLE_FIELDS = (
-    "raw_out_loc", "seq_lens_casual", "positions_casual", "c4_out_loc",
-    "c128_out_loc", "c4_topk_lengths_raw", "c4_topk_lengths_clamp1",
-    "c4_sparse_topk_lengths", "c4_sparse_page_indices", "c4_sparse_raw_indices",
+    "raw_out_loc",
+    "seq_lens_casual",
+    "positions_casual",
+    "c4_out_loc",
+    "c128_out_loc",
+    "c4_topk_lengths_raw",
+    "c4_topk_lengths_clamp1",
+    "c4_sparse_topk_lengths",
+    "c4_sparse_page_indices",
+    "c4_sparse_raw_indices",
 )
 
 
@@ -375,18 +433,26 @@ def _tensor_addresses(value, path, seen):
         items = value.items()
     else:
         items = vars(value).items() if hasattr(value, "__dict__") else ()
-    return tuple(entry for key, child in items
-                 for entry in _tensor_addresses(child, f"{path}.{key}", seen))
+    return tuple(
+        entry
+        for key, child in items
+        for entry in _tensor_addresses(child, f"{path}.{key}", seen)
+    )
 
 
 def metadata_addresses(metadata):
     core = metadata.core_attn_metadata
     values = {f"core.{name}": getattr(core, name) for name in CORE_STABLE_FIELDS}
-    values.update(indexer=metadata.indexer_metadata, c4_compress=metadata.c4_compress_metadata)
+    values.update(
+        indexer=metadata.indexer_metadata, c4_compress=metadata.c4_compress_metadata
+    )
     # Online c128 planner is intentionally replaceable in native replay. Its
     # pointers are not falsely classified as captured static tensors here.
-    return tuple(entry for name, value in values.items()
-                 for entry in _tensor_addresses(value, name, set()))
+    return tuple(
+        entry
+        for name, value in values.items()
+        for entry in _tensor_addresses(value, name, set())
+    )
 
 
 def refresh_metadata(metadata, native_refresh):
@@ -407,14 +473,20 @@ def refresh_metadata(metadata, native_refresh):
 
 def scratch_observation(tokens, *, context_capacity, free_bytes):
     """One FP32 C4 logits tensor, NOT total model/capture-pool peak usage."""
-    if any(type(n) is not int or n <= 0 for n in (tokens, context_capacity, free_bytes)):
+    if any(
+        type(n) is not int or n <= 0 for n in (tokens, context_capacity, free_bytes)
+    ):
         raise ValueError("Invalid scratch dimensions or available memory")
     compressed_columns = ((context_capacity + 255) // 256) * 64
     single_logits = tokens * compressed_columns * 4
     if free_bytes <= single_logits:
         raise ValueError("Insufficient free memory even for one C4 logits scratch")
-    return {"single_c4_logits_bytes": single_logits, "free_bytes": free_bytes,
-            "context_capacity": context_capacity, "total_capture_pool_bytes": None}
+    return {
+        "single_c4_logits_bytes": single_logits,
+        "free_bytes": free_bytes,
+        "context_capacity": context_capacity,
+        "total_capture_pool_bytes": None,
+    }
 
 
 def capture_attempt(runner, intent, native_capture, *, emit, synchronize, memory):
@@ -426,20 +498,32 @@ def capture_attempt(runner, intent, native_capture, *, emit, synchronize, memory
         synchronize()
         graphs = runner.backend._graphs
         segments = {key.size: len(graph._segments) for key, graph in graphs.items()}
-        if (set(segments) != set(intent.capture_tokens) or not all(segments.values())
-            or set(runner.attn_metadata_buffers or {}) != set(intent.capture_tokens)):
+        if (
+            set(segments) != set(intent.capture_tokens)
+            or not all(segments.values())
+            or set(runner.attn_metadata_buffers or {}) != set(intent.capture_tokens)
+        ):
             raise RuntimeError("Incomplete Flash capture registry or metadata")
         after = memory()
         free_before, free_after = before.get("free_bytes"), after.get("free_bytes")
-        sampled = (free_before, free_after) if all(
-            type(n) is int for n in (free_before, free_after)
-        ) else ()
-        emit({"event": "capture_return", "segments": segments,
-              "actual": {"backend": "breakable", "status": "captured"},
-              "sampled_min_free_bytes": min(sampled) if sampled else None,
-              "free_delta_bytes": free_before - free_after if sampled else None,
-              "peak_scope": "process_lifetime",
-              "gpu_qualified": False, "replay_validated": False, **after})
+        sampled = (
+            (free_before, free_after)
+            if all(type(n) is int for n in (free_before, free_after))
+            else ()
+        )
+        emit(
+            {
+                "event": "capture_return",
+                "segments": segments,
+                "actual": {"backend": "breakable", "status": "captured"},
+                "sampled_min_free_bytes": min(sampled) if sampled else None,
+                "free_delta_bytes": free_before - free_after if sampled else None,
+                "peak_scope": "process_lifetime",
+                "gpu_qualified": False,
+                "replay_validated": False,
+                **after,
+            }
+        )
         return result
     except Exception as error:
         emit({"event": "capture_error", "error_type": type(error).__name__})
@@ -456,20 +540,26 @@ def _worker_preflight(runner, intent, memory):
 
     mr = runner.model_runner
     attn = mr.attn_backend
-    if os.environ.get("SGLANG_SCHEDULER_SKIP_ALL_GATHER", "0").lower() not in ("0", "false"):
+    if os.environ.get("SGLANG_SCHEDULER_SKIP_ALL_GATHER", "0").lower() not in (
+        "0",
+        "false",
+    ):
         raise ValueError("Flash requires native scheduler all-rank synchronization")
     if torch.version.hip is not None or not torch.cuda.is_available():
         raise ValueError("Flash capture requires NVIDIA CUDA")
-    if (tuple(runner.capture_num_tokens) != intent.capture_tokens
+    if (
+        tuple(runner.capture_num_tokens) != intent.capture_tokens
         or not runner.use_captured_attn_metadata
         or not attn.use_captured_forward_metadata_for_breakable_cuda_graph
         or not callable(attn.init_forward_metadata_for_breakable_cuda_graph_capture)
         or not callable(attn.prepare_forward_metadata_for_breakable_cuda_graph_replay)
         # Native Flash top-k geometry, unrelated to removed C4 ordering flags.
-        or attn.page_size != 256 or attn.c4_topk != 512
+        or attn.page_size != 256
+        or attn.c4_topk != 512
         or getattr(mr, "hisparse_coordinator", None) is not None
         or not runner.require_mlp_tp_gather
-        or getattr(runner.backend, "_debug_eager", False)):
+        or getattr(runner.backend, "_debug_eager", False)
+    ):
         raise ValueError("Flash worker capture protocol/layout unsupported")
     capacity = attn.req_to_token.shape[1]
     if attn.MAX_SEQ_LEN_FOR_CAPTURE != capacity:
@@ -481,13 +571,19 @@ def _worker_preflight(runner, intent, memory):
     source = Path(inspect.getfile(type(attn))).read_bytes()
     if hashlib.sha256(source).hexdigest() != _DSV4_SOURCE_SHA:
         raise ValueError("DSV4 source changed; metadata adapter requires review")
-    return {**scratch_observation(max(intent.capture_tokens), context_capacity=capacity,
-                                  free_bytes=memory()["free_bytes"]),
-            "metadata_source_sha256": _DSV4_SOURCE_SHA}
+    return {
+        **scratch_observation(
+            max(intent.capture_tokens),
+            context_capacity=capacity,
+            free_bytes=memory()["free_bytes"],
+        ),
+        "metadata_source_sha256": _DSV4_SOURCE_SHA,
+    }
 
 
-def _install_capture_hook(intent, runner_cls, gather, emit, synchronize, memory,
-                          replay_observer=None):
+def _install_capture_hook(
+    intent, runner_cls, gather, emit, synchronize, memory, replay_observer=None
+):
     native = runner_cls.capture
 
     @wraps(native)
@@ -501,24 +597,49 @@ def _install_capture_hook(intent, runner_cls, gather, emit, synchronize, memory,
         except Exception as exc:
             error = type(exc).__name__ + ": " + str(exc)
             receipt, scratch = {}, {}
-        vote = {"error": error, "tokens": intent.capture_tokens, "dp_size": intent.dp_size,
-                "context_capacity": scratch.get("context_capacity"),
-                "metadata_source_sha256": scratch.get("metadata_source_sha256")}
+        vote = {
+            "error": error,
+            "tokens": intent.capture_tokens,
+            "dp_size": intent.dp_size,
+            "context_capacity": scratch.get("context_capacity"),
+            "metadata_source_sha256": scratch.get("metadata_source_sha256"),
+        }
         votes = gather(vote)
-        if (len(votes) != intent.dp_size or any(v["error"] for v in votes)
-            or any(v["tokens"] != intent.capture_tokens or v["dp_size"] != intent.dp_size for v in votes)
-            or any(v.get("context_capacity") != vote["context_capacity"]
-                   or v.get("metadata_source_sha256") != vote["metadata_source_sha256"] for v in votes)):
+        if (
+            len(votes) != intent.dp_size
+            or any(v["error"] for v in votes)
+            or any(
+                v["tokens"] != intent.capture_tokens or v["dp_size"] != intent.dp_size
+                for v in votes
+            )
+            or any(
+                v.get("context_capacity") != vote["context_capacity"]
+                or v.get("metadata_source_sha256") != vote["metadata_source_sha256"]
+                for v in votes
+            )
+        ):
             emit({"event": "capture_preflight_rejected", "votes": votes})
             raise RuntimeError("Flash capture preflight rejected on one or more ranks")
-        emit({"event": "capture_gate", **receipt, **scratch,
-              "replay_observer_enabled": replay_observer is not None,
-              "production_replay_synchronizes": False})
+        emit(
+            {
+                "event": "capture_gate",
+                **receipt,
+                **scratch,
+                "replay_observer_enabled": replay_observer is not None,
+                "production_replay_synchronizes": False,
+            }
+        )
         attn = self.model_runner.attn_backend
         attn._memt_flash_metadata_adapter = True
         self._memt_flash_capture_complete = False
-        result = capture_attempt(self, intent, lambda: native(self), emit=emit,
-                                 synchronize=synchronize, memory=memory)
+        result = capture_attempt(
+            self,
+            intent,
+            lambda: native(self),
+            emit=emit,
+            synchronize=synchronize,
+            memory=memory,
+        )
         _attach_replay_counter(self)
         self._memt_flash_capture_complete = True
         return result
@@ -542,7 +663,10 @@ def _install_metadata_hook(attention_cls):
 
 
 def _preserve_eager_padding(model_runner, batch, intent):
-    if not _is_flash(model_runner) or getattr(batch, "is_extend_in_batch", False) is not True:
+    if (
+        not _is_flash(model_runner)
+        or getattr(batch, "is_extend_in_batch", False) is not True
+    ):
         return
     runner = getattr(model_runner, "prefill_cuda_graph_runner", None)
     if not getattr(runner, "_memt_flash_capture_complete", False):
@@ -553,13 +677,18 @@ def _preserve_eager_padding(model_runner, batch, intent):
     # Rejecting later would retain padded dummy rows and changed GEMM/collective
     # shapes even though the batch executes eagerly. These counts are already
     # shared by every DP rank; no local eligibility or new collective belongs here.
-    if (len(counts) != intent.dp_size or len(set(counts)) != 1
-            or counts[0] not in intent.capture_tokens or effective != counts):
+    if (
+        len(counts) != intent.dp_size
+        or len(set(counts)) != 1
+        or counts[0] not in intent.capture_tokens
+        or effective != counts
+    ):
         batch.can_run_dp_breakable_cuda_graph = False
 
 
-def _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank, emit,
-                              replay_observer=None):
+def _install_replay_consensus(
+    intent, runner_cls, model_runner_cls, gather, rank, emit, replay_observer=None
+):
     prepare = model_runner_cls._prepare_eager_forward_batch
     native_can_run = runner_cls.can_run_graph
 
@@ -581,16 +710,28 @@ def _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank
         # Runs before the native is_extend/eligibility branch on EVERY rank,
         # including ranks converted from IDLE. Existing query consensus stays.
         try:
-            local = replay_vote(runner, batch, rank=rank(), native_can_run=native_can_run)
+            local = replay_vote(
+                runner, batch, rank=rank(), native_can_run=native_can_run
+            )
             error = None
         except Exception as exc:
-            local = ReplayVote(rank(), intent.dp_size, intent.capture_tokens, (), None,
-                               ("eligibility_error:" + type(exc).__name__,))
+            local = ReplayVote(
+                rank(),
+                intent.dp_size,
+                intent.capture_tokens,
+                (),
+                None,
+                ("eligibility_error:" + type(exc).__name__,),
+            )
             error = exc
         votes = gather(local)
-        if any(any(r.startswith("eligibility_error:") for r in v.reasons) for v in votes):
+        if any(
+            any(r.startswith("eligibility_error:") for r in v.reasons) for v in votes
+        ):
             emit({"event": "replay_admission_error", "rank": rank()})
-            raise RuntimeError("Flash eligibility failed on one or more ranks") from error
+            raise RuntimeError(
+                "Flash eligibility failed on one or more ranks"
+            ) from error
         agreement = agree_replay(votes, dp_size=intent.dp_size)
         batch._memt_graph_allowed = bool(
             getattr(batch, "_memt_graph_allowed", True) and agreement.allowed
@@ -598,9 +739,16 @@ def _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank
         batch._memt_flash_prefill_allowed = agreement.allowed
         _count(runner, "admissions" if agreement.allowed else "fallbacks")
         if replay_observer is not None:
-            replay_observer({"event": "replay_admission", "rank": local.rank,
-                             "allowed": agreement.allowed, "bucket": agreement.bucket,
-                             "reasons": agreement.reasons, "original_counts": local.original_counts})
+            replay_observer(
+                {
+                    "event": "replay_admission",
+                    "rank": local.rank,
+                    "allowed": agreement.allowed,
+                    "bucket": agreement.bucket,
+                    "reasons": agreement.reasons,
+                    "original_counts": local.original_counts,
+                }
+            )
         return result
 
     @wraps(native_can_run)
@@ -625,9 +773,18 @@ def replay_counters(runner):
     execute_returns counts native CPU returns even if a later observer fails.
     Submissions and returns do not verify CUDA completion or numerical quality.
     """
-    names = ("backend_submissions", "execute_returns", "execution_errors", "admissions", "fallbacks")
-    return {**{name: getattr(runner, "_memt_flash_" + name, 0) for name in names},
-            "cuda_completion_verified": False, "numeric_qualified": False}
+    names = (
+        "backend_submissions",
+        "execute_returns",
+        "execution_errors",
+        "admissions",
+        "fallbacks",
+    )
+    return {
+        **{name: getattr(runner, "_memt_flash_" + name, 0) for name in names},
+        "cuda_completion_verified": False,
+        "numeric_qualified": False,
+    }
 
 
 def _attach_replay_counter(runner):
@@ -657,8 +814,10 @@ def _install_execute_evidence(runner_cls, emit, replay_observer=None):
     def execute(self, batch, *args, **kwargs):
         if not _is_flash(self.model_runner):
             return native(self, batch, *args, **kwargs)
-        if not (getattr(self, "_memt_flash_capture_complete", False)
-                and getattr(batch, "_memt_flash_prefill_allowed", False)):
+        if not (
+            getattr(self, "_memt_flash_capture_complete", False)
+            and getattr(batch, "_memt_flash_prefill_allowed", False)
+        ):
             raise RuntimeError("Flash replay lacks capture/admission evidence")
         if self._memt_flash_expected_tokens is not None:
             raise RuntimeError("Flash replay cannot be reentered")
@@ -671,13 +830,24 @@ def _install_execute_evidence(runner_cls, emit, replay_observer=None):
             result = native(self, batch, *args, **kwargs)
             submitted = getattr(self, "_memt_flash_backend_submissions", 0) - before
             if submitted < 1:
-                raise RuntimeError("Flash runner returned without the admitted backend replay")
+                raise RuntimeError(
+                    "Flash runner returned without the admitted backend replay"
+                )
             _count(self, "execute_returns")
             if replay_observer is not None:
-                replay_observer({"event": "replay_return", "tokens": tokens,
-                                 "backend_replay_count": submitted,
-                                 "actual": {"backend": "breakable", "status": "replay_submitted"},
-                                 "cuda_synchronized": False, "numeric_qualified": False})
+                replay_observer(
+                    {
+                        "event": "replay_return",
+                        "tokens": tokens,
+                        "backend_replay_count": submitted,
+                        "actual": {
+                            "backend": "breakable",
+                            "status": "replay_submitted",
+                        },
+                        "cuda_synchronized": False,
+                        "numeric_qualified": False,
+                    }
+                )
             return result
         except Exception as error:
             _count(self, "execution_errors")
@@ -689,8 +859,19 @@ def _install_execute_evidence(runner_cls, emit, replay_observer=None):
     runner_cls.execute = execute
 
 
-def install_worker_hooks(intent, runner_cls, attention_cls, model_runner_cls, *,
-                         gather, rank, emit, synchronize, memory, replay_observer=None):
+def install_worker_hooks(
+    intent,
+    runner_cls,
+    attention_cls,
+    model_runner_cls,
+    *,
+    gather,
+    rank,
+    emit,
+    synchronize,
+    memory,
+    replay_observer=None,
+):
     """Install before constructing any Flash PrefillCudaGraphRunner.
 
     gather must all-gather Python objects on the full TP=DP4 CPU group in rank
@@ -706,8 +887,12 @@ def install_worker_hooks(intent, runner_cls, attention_cls, model_runner_cls, *,
     if getattr(runner_cls, "_memt_flash_capture_gate", False):
         raise RuntimeError("Flash capture gate already installed")
     _install_metadata_hook(attention_cls)
-    _install_capture_hook(intent, runner_cls, gather, emit, synchronize, memory, replay_observer)
-    _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank, emit, replay_observer)
+    _install_capture_hook(
+        intent, runner_cls, gather, emit, synchronize, memory, replay_observer
+    )
+    _install_replay_consensus(
+        intent, runner_cls, model_runner_cls, gather, rank, emit, replay_observer
+    )
     _install_execute_evidence(runner_cls, emit, replay_observer)
     runner_cls._memt_flash_capture_gate = True
 
@@ -732,16 +917,21 @@ def install_native_worker(intent, *, emit, replay_observer=None):
 
     def gather(value):
         output = [None] * intent.dp_size
-        torch.distributed.all_gather_object(output, value, group=get_world_group().cpu_group)
+        torch.distributed.all_gather_object(
+            output, value, group=get_world_group().cpu_group
+        )
         return output
 
     def memory():
         free, total = torch.cuda.mem_get_info()
-        return {"free_bytes": free, "total_bytes": total,
-                "allocated_bytes": torch.cuda.memory_allocated(),
-                "reserved_bytes": torch.cuda.memory_reserved(),
-                "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
-                "peak_reserved_bytes": torch.cuda.max_memory_reserved()}
+        return {
+            "free_bytes": free,
+            "total_bytes": total,
+            "allocated_bytes": torch.cuda.memory_allocated(),
+            "reserved_bytes": torch.cuda.memory_reserved(),
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        }
 
     def ranked_emit(event):
         emit({**event, "dp_rank": get_parallel().attn_dp_rank})
@@ -749,7 +939,15 @@ def install_native_worker(intent, *, emit, replay_observer=None):
     def ranked_observer(event):
         replay_observer({**event, "dp_rank": get_parallel().attn_dp_rank})
 
-    install_worker_hooks(intent, PrefillCudaGraphRunner, DeepseekV4AttnBackend, ModelRunner,
-                         gather=gather, rank=lambda: get_parallel().attn_dp_rank,
-                         emit=ranked_emit, synchronize=torch.cuda.synchronize, memory=memory,
-                         replay_observer=ranked_observer if replay_observer is not None else None)
+    install_worker_hooks(
+        intent,
+        PrefillCudaGraphRunner,
+        DeepseekV4AttnBackend,
+        ModelRunner,
+        gather=gather,
+        rank=lambda: get_parallel().attn_dp_rank,
+        emit=ranked_emit,
+        synchronize=torch.cuda.synchronize,
+        memory=memory,
+        replay_observer=ranked_observer if replay_observer is not None else None,
+    )

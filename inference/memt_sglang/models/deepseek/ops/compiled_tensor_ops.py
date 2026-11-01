@@ -20,7 +20,9 @@ def _epsilon_buffer(values, dtype, stream):
 def grouped_epsilon(values, latent):
     """Materialize host epsilon once, outside the compiled projection graph."""
     dtype = torch.float64 if latent.dtype == torch.float64 else torch.float32
-    return _epsilon_buffer(tuple(values), dtype, torch.cuda.current_stream(latent.device))
+    return _epsilon_buffer(
+        tuple(values), dtype, torch.cuda.current_stream(latent.device)
+    )
 
 
 def _latent_norm(inputs, weight, eps):

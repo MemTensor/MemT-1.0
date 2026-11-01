@@ -51,7 +51,9 @@ class MemoryDecodeGraph:
         # Immutable query plans and epsilon buffers are cached per stream.
         # Warmup must use the SAME stream as capture, before recording starts.
         with torch.cuda.stream(runner.backend._capture_stream):
-            self.allocate(runner.buffers.input_ids.numel(), runner.model_runner.device)
+            # The runner resolves its complete capture ladder before this hook.
+            # Allocate for its maximum, independent of bucket visitation order.
+            self.allocate(runner.max_num_token, runner.model_runner.device)
             self.slots.fill_(-1)
             self._last_slots = None
             self.capture_active = True
@@ -161,6 +163,10 @@ def install_memory_capture():
         with manager.capture(self):
             result = native_capture(self, *args, **kwargs)
         retained = len(owners) - owners_before
+        # DSV4 exposes ownership through its model instance flag. Qwen does not
+        # use this API and retains its graph inputs through native ownership.
+        if hasattr(native_model, "_pin_decode_graph_owners") and not pinned:
+            raise RuntimeError("Native decode tensor ownership is disabled")
         if pinned and retained < len(native_model.layers):
             raise RuntimeError(
                 "Decode capture did not retain every native layer's tensor owners"

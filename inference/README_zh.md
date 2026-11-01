@@ -18,94 +18,22 @@
 - [Checkpoint 与快照格式](#checkpoint-与快照格式)
 - [许可证](#许可证)
 
-### Flash 记忆 decode 图的额外要求
+### 解码图与数值策略
 
-`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` 把记忆读取路径纳入 decode CUDA 图。它是本包中
-唯一一项带来 decode 提速的改动，同时也是前置条件最多的开关，因此这里给出**一整段可复制**的
-配置，而不是分散说明。
-
-**overlay 是独立交付物。** 下面每一项能力都通过显式的 API 版本常量探测，而不是 `hasattr`，
-所以 overlay 缺失时会在启动阶段失败，不会静默降级。把 overlay 放到 site-packages 之前：
+默认采用 fast 计算；确定性是可选配置。两种模式都必须保证捕获张量的生命周期和缓冲区安全。
+参见[依赖安装](docs/SGLANG_DEPENDENCY.md)和[验收范围](docs/VALIDATION.md)。
 
 ```bash
-export PYTHONPATH=/path/to/sglang-flash-release-v2:$PYTHONPATH
-```
-
-#### 完整开关集合
-
-```bash
-# 必需：打开图，并保留它捕获的读取路径。
 export MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1
-export MEMT_EXPERIMENT_SLOT_READ=1
-
-# 必需：replay 一致性。捕获只记录一次设备地址与控制流，之后每次 replay 重放同一批节点，
-# 因此任何"在 replay 时可能选中不同 KV 行"的因素都必须在捕获前固定。
-export MEMT_EXPERIMENT_C4_STABLE_TOPK=1               # top-k 平局打破稳定
-export MEMT_EXPERIMENT_PADDED_DECODE_QUERY=1          # decode 几何定长
-export MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY=1   # KV 容量未被裁剪
-export SGLANG_DSV4_PIN_DECODE_INTERMEDIATES=1         # 保留被捕获的张量所有者
-export SGLANG_DSV4_DETERMINISTIC_PROFILE=1            # 见下方说明
-
-# overlay 默认值；一并列出，因为同一个校验会读取它们。
-export SGLANG_OPT_USE_TILELANG_MHC_PRE=1
-export SGLANG_OPT_DEEPGEMM_HC_PRENORM=1
+# Launcher 自动解析 reader、padded geometry 和 stable C4 默认值。
+python -m memt_sglang.launch --model-path MODEL_PATH \
+  --cuda-graph-config '{"prefill":{"backend":"disabled"},"decode":{"backend":"breakable"}}'
 ```
 
-启动时解码图需为 breakable：
-
-```bash
---cuda-graph-config '{"prefill":{"backend":"disabled"},"decode":{"backend":"breakable","bs":[1,2,3,4,7,8,16,24,32],"max_bs":32}}'
-```
-
-overlap 调度与 PDMux 必须关闭；开任一者在启动期即被拒绝。
-
-#### 为什么只设 `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` 不够
-
-overlay 里计算的是
-
-```python
-_pin_decode_graph_owners = (
-    SGLANG_DSV4_DETERMINISTIC_PROFILE and SGLANG_DSV4_PIN_DECODE_INTERMEDIATES
-)
-```
-
-**两个都设**才真正保留被捕获的张量。本包同时要求两者，报错会点名缺的是哪一个。
-只设后者会得到一张能捕获、能 replay、不报错的图，但它读的是自己从未保留的张量存储——
-实测该配置下最大 case 的 target-logprob p99 高于 0.1，而正确 pin 之后为 0.000724。
-
-#### 成功信号
-
-每个 rank 的日志应出现一行：
-
-```
-MemT memory decode captured: local buckets=[...], graph segments=[1], native tensor owners=N
-```
-
-**每个 bucket 都是 `graph segments=[1]` 才是关键。** 出现 `2` 或更大说明图被截断
-（最可能是捕获期间重新进入了某个 Python 回调），只有部分被录制。**这不是服务器会报错的状态，
-它只是变慢**，所以必须靠看日志确认。
-
-#### 失败信息对照
-
-| 报错 | 原因 |
-| --- | --- |
-| `... requires the separately supplied SGLang stable exact top-k API v1` | `PYTHONPATH` 里没有 overlay，或 overlay 版本过旧 |
-| `... requires these switches to be set exactly; missing or wrong: <names>` | 上面某一行未设或设为 `0`；报错会点名 |
-| `Memory decode graph requires breakable decode and SLOT_READ=1` | `--cuda-graph-config` 的 decode backend 是 `disabled`，或 `SLOT_READ` 未开 |
-| `Memory decode graph requires overlap scheduling disabled` | 未传 `--disable-overlap-schedule`，或开了 overlap |
-| `MemT stable C4 profile currently validates CUDA SM103 only` | 非 SM103（B300 级别）设备。kernel 本身没有架构分支，这道门是**验证范围限制**，不是硬件需求 |
-
-数值可复现性是独立、由使用者显式选择的档位：
-
-| `MEMT_NUMERICS` | 保证什么 | Nano 上实测代价 |
-| --- | --- | --- |
-| `fast`（默认） | 结果正确；同一请求的答案可能随「批里还有什么」而变 | 基准 |
-| `strict` | 并发 32 下同一请求跨轮可复现 | TPOT +7.7%（C1）~ +16.6%（C32） |
-
-依据：同一冻结初态、greedy 生成 256 token、10 轮。并发 32 时 `strict` 复现
-288/288 对请求，`fast` 为 256/288（88.9%）；并发 1 时两者都是 288/288。
-选择 `fast` 却同时传入 `--enable-deterministic-inference` 或任一 `SGLANG_DSV4_*`
-profile 开关时报错，而不是静默降级。
+Flash 需要随包提供的 SGLang 补丁。Stable C4 是本适配器使用的参考选择实现；
+CUDA Graph 本身允许重放时索引值变化。Owner 保留独立于确定性算术策略。
+显式冲突的配置会报错。Memory graph 与 overlap/PDMux 的生命周期适配尚未验收，
+目前继续明确拒绝该组合。硬件上的测试覆盖与内核能力要求分开记录。
 
 ## 安装
 
@@ -144,30 +72,11 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
   --port 30001 --state-directory /data/memt-state
 ```
 
-### 推荐组合（实测，不是声明）
+### 性能与配置
 
-每一行都在冻结初态上跑了 10 轮，并发 1 与 32，512 token 查询，TPOT 单位 ms/token。
-行标题写明实际启用的开关，不用 "best" 这类笼统标签。
-
-| 模型 | 启用的特性 | 数值档位 | C1 TPOT | C32 TPOT | 结论 |
-| --- | --- | --- | ---: | ---: | --- |
-| Nano | metadata cache、slot read、decode graph | `strict` | 7.48 | 10.98 | 推荐 |
-| Nano | 同上 | `fast` | 7.48 | 10.98 | 相对另一个基准快 7.7%/16.6%，见上方档位表 |
-| Nano | 同上 + prefill graph | `strict` | 9.04 | 11.59 | **不推荐**：慢 21% |
-| Flash | metadata cache、slot read、decode graph | `strict` | 28.12 | 32.48 | 推荐 |
-| Flash | 同上 | `fast` | 16.60 | 22.58 | 快 41%/31%，但先看可复现率 |
-| Flash | 同上 + prefill graph | `strict` | 28.92 | 36.70 | **不推荐**：慢 3%/13% |
-
-两条需要直说的结论：
-
-- **prefill 图在我们这套配置下没有收益。** Nano 与 Flash 都确认入图（服务日志有捕获记录）、
-  输出逐 token 一致，但都更慢。Flash 尤其明显：只有某个 rank 的 token 数恰好等于捕获的
-  gear 时才入图，并发流量几乎不可能命中。
-- **Flash 用 `fast` 放弃的不是末几位小数，而是并发 32 下的可复现性**：`strict` 下
-  100% 的请求对可复现，`fast` 下只有 38~42%，首个分歧出现在第 4 个 token。
-
-**没有实测所以不在表内**：overlap、query chunking、query coalescing、partial commit。
-在有人真正跑过之前，这些按「不支持」对待。
+实测配置和边界见[验收范围](docs/VALIDATION.md)。并发压测应使用不同提示，版本对照应
+保持相同的非空初始记忆。Prefill 图、overlap 和 attention TP 单独适配和验收；
+上面的 decode 图示例不启用这些功能。
 
 ### 脚本配置示例
 
@@ -577,52 +486,10 @@ Nano 将骨干配置放在 `backbone_configs` 中，使用 `model_type: "qwen3_5
 
 元数据包含 `format=memt-memory-v1` 和 `identity=<HF Session identity>`；身份覆盖骨干配置、记忆配置、原生编码、聊天模板和 tokenizer 词表。已初始化文件使用 `memory.<layer>` 键、FP32 类型和 `[1, heads, K, V]` 形状；空 HF 记忆不包含张量。导入前检查身份、层集合、类型和形状。将 HF 文件传入服务端 `--state-directory` 后可按文件名加载；服务端导出文件也可由相同模型/tokenizer 的 HF Session 加载。旧 SGLang 的 `memory.layers.<layer>` 及 `model`/`encoding` 元数据格式与此格式不兼容。快照只包含已发布记忆，不包含对话记录或原生 KV cache。
 
-## 数值验证
+## 验证
 
-记忆解码图改变的是记忆读取 kernel **何时发射**，不是**算什么**。这一点是测出来的，不是声称的。
-
-### 设置
-
-两臂同树、同冻结记忆快照、同 prompt、greedy 解码。唯一差别是 `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH`。上文列出的五个回放一致性开关**两臂都设**，所以对比隔离的是图本身，没有混入稳定 top-k 的开销。
-
-两臂确实不同——这是从服务端日志核实的，不是假设：
-
-| | 图关 | 图开 |
-| --- | --- | --- |
-| `Capture target decode CUDA graph` 行数 | 0 | 8 |
-| `graph segments=[...]` | 无 | 6 次捕获，**全部 `[1]`**（单段） |
-
-### 前 128 个 decode step 的 next-token logits
-
-logits 以 float32 存储（用 bf16 存会把要测的差异本身量化掉），在完整的 129,280 词表上比较。
-
-| 指标 | bs=1（1 个会话 × 128 步） | bs=32（32 个会话 × 128 步） |
-| --- | --- | --- |
-| L2 相对误差 `‖on−off‖₂/‖off‖₂` | **0.000e+00**（最大 0） | **0.000e+00**（最大 0） |
-| Pearson 相关系数 | **1.000000**（最小 1.0） | **1.000000**（最小 1.0） |
-| top-1 一致 | **128/128** | **4096/4096** |
-
-*2026-11-01 更正。* 本表早先把 bs=32 写成“4 个 DP rank × 128 步”。采集探针按请求 id 的第一段区分会话，而那一段恒为 `memt`，于是同一 rank 上的所有会话落进同一个桶，对比实际只覆盖了 32 个会话的前 16 步。探针已改为按会话区分；上表是重测结果，覆盖全部 32 个会话的完整 128 步，bs=1 也由 118 步补全为 128 步。结论（逐位一致）不变，覆盖范围现在与表头一致。
-
-这里的 `0` 是**逐位相同**，不是"误差很小"。这是应有结果：同权重、同输入、同确定性路径——图只改变发射调度。
-
-边界写明：本项覆盖 Flash 的 bs=1 与 bs=32 两个 bucket，只覆盖 decode。其余 bucket 是各自独立的图，未逐一对比（其捕获日志同样是 `segments=[1]`）。Nano 的图是另一套实现，未测。
-
-### LocoMo 端到端
-
-原评测链驱动 vLLM；本次只换引擎，交给官方离线打分器的产物格式不变，因此打分器原样运行。
-
-| | 图关 | 图开 |
-| --- | --- | --- |
-| 实例数 | 1540 / 1540 | 1540 / 1540 |
-| **聚合类别分** | **2.9714** | **2.9714** |
-| 聚合 F1 | 0.26042 | 0.25987 |
-| 输出质量门 | passed | passed |
-
-类别分逐位相同。F1 差 5.5e-4（0.21%）——这是"每答案最多 512 token"的生成文本差异，不是短程数值分叉，因为上面 128 步 logits 是逐位相同的。两臂都恰好有 1/1540 道题触到长度上限，说明都没有被截断主导。
-
-**跑这套评测时发现的上游缺陷。** 开 `--enable-deterministic-inference` 时，SGLang 按**整个 step** 决定采样路径（`is_all_greedy = all(top_k <= 1 for r in reqs)`）。commit 请求不生成 token，但仍携带采样参数；若它保留服务端默认值，任何"commit + query"混合的 step 都会变成非 greedy，而非 greedy 的 gumbel 路径在 `murmur_hash32` 里断言 `seed.shape == positions.shape`，直接打死调度器。本包的规避方式：commit 也使用 greedy 参数。这是上游行为，不是这些补丁引入的，值得反馈给上游。
-
+详见[验收范围](docs/VALIDATION.md)。`tests/` 保存生命周期与配置回归，不进入发行包。
+硬件验收必须包含 GPU 捕获、重放和数值对照。CPU 测试不代表模型质量或性能验收。
 
 ## 许可证
 

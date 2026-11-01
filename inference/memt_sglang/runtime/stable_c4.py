@@ -1,35 +1,9 @@
-"""Force the native exact/stable C4 top-k entry point into the DSV4 indexer.
+"""Install the overlay's stable exact C4 selection implementation.
 
-Why this file exists
---------------------
-The DSV4 indexer picks the top-512 keys per token with `topk_transform_512`.
-The stock implementation is free to break ties and to emit indices in
-whatever order the kernel happens to produce, because for a *single* forward
-that choice does not change the result: any k of the tied candidates is
-equally valid.
-
-That freedom becomes a correctness problem once the forward is captured into a
-CUDA graph. Capture records the kernel's addresses and control flow once; every
-replay re-executes those same device nodes. If the selection of tied candidates
-depends on anything that differs between capture and replay -- a nondeterministic
-reduction order, a lookup order over a hash-like structure -- then replay can
-read a *different* set of KV rows than the ones it captured against, and the
-memory path decodes from rows it never validated.
-
-The overlay ships `topk_transform_512_stable`, which pins both the tie-break
-(logical id) and the output order. This module swaps it in for the indexer's
-two call sites so capture and replay make identical choices.
-
-Scope of the change
--------------------
-Only the DSV4 indexer is patched, and only when C4_STABLE_TOPK is on. Nothing
-else in SGLang is touched: the patch is applied through the indexer module
-object, not through a global import hook, so a process that never enables the
-flag behaves exactly as stock.
-
-The checks below are deliberately fail-closed. Each one corresponds to a
-property the graph relies on; silently proceeding without it would produce a
-graph that runs, produces plausible-looking numbers, and is wrong.
+Stable tie ordering is the reference selection policy used by this adapter.
+CUDA graphs can consume changing index values at replay: stable selection is
+not a general CUDA graph requirement. Keep this implementation selected until
+an alternative has passed the same model-level numerical comparison.
 """
 
 import logging
@@ -38,7 +12,6 @@ from functools import wraps
 from importlib import import_module
 
 from memt_sglang.runtime.features import enabled
-
 
 # The overlay ships exactly one kernel width, and the width appears in the
 # symbol name as well as in the check. Deriving the name from the constant keeps
@@ -66,10 +39,6 @@ ARCH_OVERRIDE_VARIABLE = "MEMT_STABLE_C4_ARCH"
 # constant rather than by hasattr(): a missing constant means "this overlay
 # predates the API", which must stop startup instead of degrading silently.
 _GRAPH_PROFILE_MARKS = (
-    ("sglang.kernels.ops.layernorm.mhc", "FIXED_MHC_REDUCTION_API_VERSION"),
-    ("sglang.srt.managers.scheduler", "DSV4_PHASE_ISOLATION_API_VERSION"),
-    ("sglang.srt.server_args", "DSV4_DETERMINISTIC_PROFILE_API_VERSION"),
-    ("sglang.srt.models.deepseek_v2", "DSV4_MOE_COMBINE_FP32_API_VERSION"),
     ("sglang.srt.models.deepseek_v4", "DSV4_DECODE_OWNERS_API_VERSION"),
 )
 
@@ -83,8 +52,7 @@ def _format_capability(capability):
 def _allowed_capabilities(environ=None):
     """Capabilities `install` will accept, or None for "do not gate".
 
-    Unset  -> the qualified set, so a default deployment cannot silently claim
-              numerics nobody measured.
+    Unset  -> no architecture allowlist; the kernel validates its capabilities.
     "any"  -> None, i.e. run anywhere and say so in the log.
     list   -> exactly those, e.g. "10.3,9.0".
 
@@ -93,11 +61,13 @@ def _allowed_capabilities(environ=None):
     operator took responsibility for an unqualified part", and the log has to
     be able to tell them apart afterwards.
     """
-    raw = (environ if environ is not None else os.environ).get(
-        ARCH_OVERRIDE_VARIABLE, ""
-    ).strip()
+    raw = (
+        (environ if environ is not None else os.environ)
+        .get(ARCH_OVERRIDE_VARIABLE, "")
+        .strip()
+    )
     if not raw:
-        return QUALIFIED_CAPABILITIES
+        return None
     if raw.lower() == "any":
         return None
     allowed = []
@@ -163,22 +133,21 @@ def install(config):
 
     native = import_module("sglang.jit_kernel.dsv4.topk")
     function = getattr(native, STABLE_TOPK_SYMBOL, None)
-    if getattr(native, "STABLE_EXACT_TOPK_API_VERSION", None) != STABLE_TOPK_API_VERSION or not callable(
-        function
-    ):
+    if getattr(
+        native, "STABLE_EXACT_TOPK_API_VERSION", None
+    ) != STABLE_TOPK_API_VERSION or not callable(function):
         raise ValueError(
             "C4_STABLE_TOPK requires the separately supplied SGLang stable exact "
             f"top-k API v{STABLE_TOPK_API_VERSION}"
         )
 
-    # The graph additionally depends on the rest of the isolated precision
-    # profile. Checking a version mark is not a behavioural test: it only proves
-    # the overlay was built from the revision that has these fixes.
+    # The graph requires captured tensor ownership support. Optional arithmetic
+    # profiles are deliberately absent from this capability check.
     if enabled("MEMORY_DECODE_GRAPH"):
         for module, attribute in _GRAPH_PROFILE_MARKS:
             if getattr(import_module(module), attribute, None) != 1:
                 raise ValueError(
-                    "Flash graph requires the complete isolated DSV4 precision profile v1"
+                    "Flash graph requires captured tensor ownership API v1"
                 )
 
     indexer = import_module("sglang.srt.layers.attention.dsv4.indexer")

@@ -167,7 +167,12 @@ class MemoryRuntime:
         reader = getattr(compute, "packed_query_slots", None)
         if not callable(reader):
             raise RuntimeError("Padded decode query requires a masked slot reader")
-        slot_key = ("padded_decode", hidden.device, len(hidden), _metadata_stream(hidden.device))
+        slot_key = (
+            "padded_decode",
+            hidden.device,
+            len(hidden),
+            _metadata_stream(hidden.device),
+        )
         if not self.metadata_cache or slot_key not in self._prepared_groups:
             slots = torch.full(
                 (len(hidden),), -1, dtype=torch.int64, device=hidden.device

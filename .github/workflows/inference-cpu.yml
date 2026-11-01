@@ -1,0 +1,23 @@
+name: inference-cpu
+on:
+  pull_request:
+    paths: ['inference/**', '.github/workflows/inference-cpu.yml']
+  push:
+    paths: ['inference/**', '.github/workflows/inference-cpu.yml']
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inference
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install pytest numpy safetensors ruff==0.17.3
+      - run: pip install -e .
+      - run: ruff check memt_sglang tests tools
+      - run: ruff format --check memt_sglang tests tools
+      - run: pytest tests -q -ra

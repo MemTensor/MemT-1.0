@@ -60,12 +60,16 @@ class NumericsTierTests(unittest.TestCase):
 
     def test_explicit_fast_rejects_a_profile_switch_and_names_it(self):
         with self.assertRaises(ValueError) as caught:
-            self.validate({"MEMT_NUMERICS": "fast", "SGLANG_DSV4_MOE_COMBINE_FP32": "1"}, OFF)
+            self.validate(
+                {"MEMT_NUMERICS": "fast", "SGLANG_DSV4_MOE_COMBINE_FP32": "1"}, OFF
+            )
         self.assertIn("SGLANG_DSV4_MOE_COMBINE_FP32", str(caught.exception))
 
     # --- explicit strict ---------------------------------------------------
     def test_explicit_strict_accepts_a_complete_config(self):
-        self.assertEqual(self.validate(dict(PROFILE, MEMT_NUMERICS="strict"), ON), "strict")
+        self.assertEqual(
+            self.validate(dict(PROFILE, MEMT_NUMERICS="strict"), ON), "strict"
+        )
 
     def test_explicit_strict_rejects_a_missing_switch(self):
         partial = dict(PROFILE, MEMT_NUMERICS="strict")
@@ -82,9 +86,12 @@ class NumericsTierTests(unittest.TestCase):
     def test_replay_switches_are_not_tier_switches(self):
         # PADDED_DECODE_QUERY once sat in both sets, which made `fast` +
         # memory graph impossible to configure. It is replay-only.
-        self.assertNotIn("MEMT_EXPERIMENT_PADDED_DECODE_QUERY",
-                         features.STRICT_NUMERICS_SWITCHES)
-        with patch.dict(os.environ, {"MEMT_EXPERIMENT_PADDED_DECODE_QUERY": "1"}, clear=True):
+        self.assertNotIn(
+            "MEMT_EXPERIMENT_PADDED_DECODE_QUERY", features.STRICT_NUMERICS_SWITCHES
+        )
+        with patch.dict(
+            os.environ, {"MEMT_EXPERIMENT_PADDED_DECODE_QUERY": "1"}, clear=True
+        ):
             self.assertEqual(features.strict_numerics_pending(), [])
 
 

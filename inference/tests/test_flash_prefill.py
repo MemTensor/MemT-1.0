@@ -93,7 +93,9 @@ def native_source_path(relative):
     configured = os.environ.get("MEMT_TEST_SGLANG_SOURCE")
     if configured is not None:
         if not configured.strip():
-            pytest.fail("MEMT_TEST_SGLANG_SOURCE must name a source root containing srt/")
+            pytest.fail(
+                "MEMT_TEST_SGLANG_SOURCE must name a source root containing srt/"
+            )
         roots = [Path(configured).expanduser()]
     else:
         spec = importlib.util.find_spec("sglang")
@@ -109,17 +111,23 @@ def native_source_path(relative):
 
 def native_eligibility():
     # Execute the actual native method, rather than a hand-copied veto list.
-    source = native_source_path("srt/model_executor/runner/prefill_cuda_graph_runner.py")
+    source = native_source_path(
+        "srt/model_executor/runner/prefill_cuda_graph_runner.py"
+    )
     tree = ast.parse(source.read_text())
     node = next(
-        n for n in ast.walk(tree)
+        n
+        for n in ast.walk(tree)
         if isinstance(n, ast.FunctionDef) and n.name == "can_run_graph"
     )
     node.returns = None
     for arg in node.args.args:
         arg.annotation = None
     namespace = {"_MAX_PREFILL_CUDA_GRAPH_PADDING_FACTOR": 2}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+    exec(
+        compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"),
+        namespace,
+    )
     return namespace["can_run_graph"]
 
 
@@ -141,7 +149,10 @@ def test_intent_survives_native_downgrade_without_modifying_arguments():
 
 def test_disabled_intent_and_resolved_shape_identity_are_distinct():
     intent = FlashPrefillIntent("disabled", (), 4)
-    assert prefill_identity(intent, NS(backend="disabled", bs=None))["status"] == "not_requested"
+    assert (
+        prefill_identity(intent, NS(backend="disabled", bs=None))["status"]
+        == "not_requested"
+    )
     intent = FlashPrefillIntent("breakable", (512,), 4)
     result = prefill_identity(intent, NS(backend="breakable", bs=[1024]))
     assert result["requested_capture_tokens"] == [512]
@@ -149,18 +160,27 @@ def test_disabled_intent_and_resolved_shape_identity_are_distinct():
     assert "resolved_shapes_changed" in result["pending"]
 
 
-@pytest.mark.parametrize("backend,buckets,dp", [
-    ("full", (512,), 2), ("breakable", (), 2),
-    ("breakable", (0,), 2), ("breakable", (1024, 512), 2),
-    ("breakable", (512, 512), 2), ("breakable", (True,), 2),
-    ("breakable", (512,), True), ("breakable", (512,), 0),
-])
+@pytest.mark.parametrize(
+    "backend,buckets,dp",
+    [
+        ("full", (512,), 2),
+        ("breakable", (), 2),
+        ("breakable", (0,), 2),
+        ("breakable", (1024, 512), 2),
+        ("breakable", (512, 512), 2),
+        ("breakable", (True,), 2),
+        ("breakable", (512,), True),
+        ("breakable", (512,), 0),
+    ],
+)
 def test_bad_intent_rejected(backend, buckets, dp):
     with pytest.raises(ValueError):
         FlashPrefillIntent(backend, buckets, dp)
 
 
-@pytest.mark.parametrize("counts", [(0, 512), (511, 512), (512, 513), (512, 0, 512, 512)])
+@pytest.mark.parametrize(
+    "counts", [(0, 512), (511, 512), (512, 513), (512, 0, 512, 512)]
+)
 def test_original_idle_or_uneven_counts_cannot_be_hidden_by_max_len(counts):
     votes = [vote(rank, counts) for rank in range(len(counts))]
     assert all(not item.eligible for item in votes)
@@ -183,33 +203,42 @@ def test_dp_bucket_expansion_needs_a_separate_collective_shape_adapter(size):
     assert result.bucket == (512 if size == 511 else 1024)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("original_global_num_tokens_cpu", None),
-    ("original_global_num_tokens_cpu", [512]),
-    ("original_global_num_tokens_cpu", [True, 512]),
-    ("global_num_tokens_cpu", [512, 1024]),
-    ("global_dp_buffer_len", 512),
-    ("can_run_dp_breakable_cuda_graph", False),
-    ("extend_seq_lens_cpu", [511]),
-    ("extend_prefix_lens_cpu", [-1]),
-    ("num_token_non_padded_cpu", 511),
-    ("forward_mode", mode("idle")),
-    ("_original_forward_mode", mode("idle")),
-    ("dp_padding_mode", NS(is_max_len=lambda: False)),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("original_global_num_tokens_cpu", None),
+        ("original_global_num_tokens_cpu", [512]),
+        ("original_global_num_tokens_cpu", [True, 512]),
+        ("global_num_tokens_cpu", [512, 1024]),
+        ("global_dp_buffer_len", 512),
+        ("can_run_dp_breakable_cuda_graph", False),
+        ("extend_seq_lens_cpu", [511]),
+        ("extend_prefix_lens_cpu", [-1]),
+        ("num_token_non_padded_cpu", 511),
+        ("forward_mode", mode("idle")),
+        ("_original_forward_mode", mode("idle")),
+        ("dp_padding_mode", NS(is_max_len=lambda: False)),
+    ],
+)
 def test_missing_or_inconsistent_metadata_fails_closed(field, value):
     runner, batch = runner_and_batch()
     setattr(batch, field, value)
-    assert not replay_vote(runner, batch, rank=0, native_can_run=lambda *a: True).eligible
+    assert not replay_vote(
+        runner, batch, rank=0, native_can_run=lambda *a: True
+    ).eligible
 
 
-@pytest.mark.parametrize("failure", ["runtime", "query", "metadata", "capture", "backend", "shape"])
+@pytest.mark.parametrize(
+    "failure", ["runtime", "query", "metadata", "capture", "backend", "shape"]
+)
 def test_required_live_protocols(failure):
     runner, batch = runner_and_batch()
     if failure == "runtime":
         runner.model_runner.model.memt_runtime = None
     elif failure == "query":
-        runner.model_runner.model.memt_runtime.worker_sessions.requests["q"].complete = True
+        runner.model_runner.model.memt_runtime.worker_sessions.requests[
+            "q"
+        ].complete = True
     elif failure == "metadata":
         runner.model_runner.attn_backend.prepare_forward_metadata_for_breakable_cuda_graph_replay = None
     elif failure == "capture":
@@ -218,10 +247,26 @@ def test_required_live_protocols(failure):
         runner.prefill_backend_name = "full"
     else:
         runner.capture_num_tokens = [1024, 512]
-    assert not replay_vote(runner, batch, rank=0, native_can_run=lambda *a: True).eligible
+    assert not replay_vote(
+        runner, batch, rank=0, native_can_run=lambda *a: True
+    ).eligible
 
 
-@pytest.mark.parametrize("veto", ["embeds", "replace", "prefix", "verify", "hidden", "slots", "dp", "logprob", "max", "factor"])
+@pytest.mark.parametrize(
+    "veto",
+    [
+        "embeds",
+        "replace",
+        "prefix",
+        "verify",
+        "hidden",
+        "slots",
+        "dp",
+        "logprob",
+        "max",
+        "factor",
+    ],
+)
 def test_all_archived_native_vetoes_are_retained(veto):
     runner, batch = runner_and_batch()
     if veto == "embeds":
@@ -254,14 +299,18 @@ def test_all_archived_native_vetoes_are_retained(veto):
 def test_native_delegated_once_and_exceptions_are_not_swallowed():
     runner, batch = runner_and_batch()
     calls = []
+
     def native(r, b):
         calls.append((r, b))
         return False
+
     result = replay_vote(runner, batch, rank=0, native_can_run=native)
     assert result.reasons == ("native_veto",)
     assert calls == [(runner, batch)]
+
     def broken(r, b):
         raise RuntimeError("native fault")
+
     with pytest.raises(RuntimeError, match="native fault"):
         replay_vote(runner, batch, rank=0, native_can_run=broken)
 
@@ -271,10 +320,15 @@ def test_all_rank_agreement_is_required_even_for_locally_valid_shapes():
     assert first.eligible and second.eligible
     agreed = agree_replay([first, second], dp_size=2)
     assert agreed.allowed and agreed.bucket == 512
-    for votes in ([], [first], [first, first], [first, replace(second, bucket=1024)],
-                  [first, replace(second, reasons=("native_veto",))],
-                  [first, replace(second, original_counts=(511, 511))],
-                  [first, replace(second, capture_tokens=(512, 2048))]):
+    for votes in (
+        [],
+        [first],
+        [first, first],
+        [first, replace(second, bucket=1024)],
+        [first, replace(second, reasons=("native_veto",))],
+        [first, replace(second, original_counts=(511, 511))],
+        [first, replace(second, capture_tokens=(512, 2048))],
+    ):
         assert not agree_replay(votes, dp_size=2).allowed
 
 
@@ -298,12 +352,16 @@ def test_balanced_multi_request_prefill_keeps_lengths_and_prefixes():
     batch.batch_size = 2
     batch.extend_seq_lens_cpu = [255, 257]
     batch.extend_prefix_lens_cpu = [10, 20]
-    assert replay_vote(runner, batch, rank=0, native_can_run=native_eligibility()).eligible
+    assert replay_vote(
+        runner, batch, rank=0, native_can_run=native_eligibility()
+    ).eligible
     assert batch.extend_seq_lens_cpu == [255, 257]
     assert batch.extend_prefix_lens_cpu == [10, 20]
 
 
-@pytest.mark.parametrize("rank,dp_size", [(True, 2), (-1, 2), (2, 2), (0, False), (0, 0)])
+@pytest.mark.parametrize(
+    "rank,dp_size", [(True, 2), (-1, 2), (2, 2), (0, False), (0, 0)]
+)
 def test_invalid_rank_topology_raises_before_native(rank, dp_size):
     runner, batch = runner_and_batch()
     runner.dp_size = dp_size
@@ -336,7 +394,9 @@ def test_metadata_probe_never_copies_device_counts_to_host():
 def test_explicit_config_uses_native_lock_and_locks_max_bs_too():
     intent = FlashPrefillIntent("breakable", (512, 1024), 4)
     assert fp.explicit_capture_config(intent) == {
-        "backend": "breakable", "bs": [512, 1024], "max_bs": 1024
+        "backend": "breakable",
+        "bs": [512, 1024],
+        "max_bs": 1024,
     }
     for invalid in (
         FlashPrefillIntent("disabled", (), 4),
@@ -350,13 +410,18 @@ def test_explicit_config_uses_native_lock_and_locks_max_bs_too():
 def native_server_method(name):
     source = native_source_path("srt/server_args.py")
     tree = ast.parse(source.read_text())
-    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+    return next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name
+    )
 
 
 def native_rule_source():
     source = native_source_path("srt/server_args.py")
     node = native_server_method("_disable_breakable_cudagraph_if_incompatible")
-    return "\n".join(source.read_text().splitlines()[node.lineno - 1:node.end_lineno]) + "\n"
+    return (
+        "\n".join(source.read_text().splitlines()[node.lineno - 1 : node.end_lineno])
+        + "\n"
+    )
 
 
 def test_native_explicit_backend_skips_blanket_checks():
@@ -370,37 +435,70 @@ def test_native_explicit_backend_skips_blanket_checks():
 
 def config_args():
     values = dict(
-        enable_dp_attention=True, attn_cp_size=1, moe_a2a_backend="none",
+        enable_dp_attention=True,
+        attn_cp_size=1,
+        moe_a2a_backend="none",
         quantization=None,
     )
     args = NS(
-        cuda_graph_config=NS(prefill=NS(backend="breakable", bs=[512, 1024], max_bs=1024)),
+        cuda_graph_config=NS(
+            prefill=NS(backend="breakable", bs=[512, 1024], max_bs=1024)
+        ),
         _cuda_graph_config_locked={("prefill", k) for k in ("backend", "bs", "max_bs")},
         _resolved=lambda: NS(**values),
-        get_model_config=lambda: NS(hf_config=NS(model_type="memt_deepseek_v4"), is_multimodal=False),
+        get_model_config=lambda: NS(
+            hf_config=NS(model_type="memt_deepseek_v4"), is_multimodal=False
+        ),
         use_mla_backend=lambda: False,
-        device="cuda", tp_size=4, dp_size=4, ep_size=4, pp_size=1, dcp_size=1,
-        lora_paths=None, enable_lora=False, load_format="safetensors",
-        disable_overlap_schedule=True, enable_two_batch_overlap=False,
-        enable_memory_saver=False, speculative_algorithm=None,
-        disaggregation_mode="null", enable_torch_compile=False,
-        enable_hierarchical_cache=False, cpu_offload_gb=0, enable_symm_mem=False,
-        enable_dsa_prefill_context_parallel=False, enable_prefill_cp=False,
-        enable_deepseek_v4_fp4_indexer=False, enable_eplb=False,
-        expert_distribution_recorder_mode=None, debug_cuda_graph=False,
+        device="cuda",
+        tp_size=4,
+        dp_size=4,
+        ep_size=4,
+        pp_size=1,
+        dcp_size=1,
+        lora_paths=None,
+        enable_lora=False,
+        load_format="safetensors",
+        disable_overlap_schedule=True,
+        enable_two_batch_overlap=False,
+        enable_memory_saver=False,
+        speculative_algorithm=None,
+        disaggregation_mode="null",
+        enable_torch_compile=False,
+        enable_hierarchical_cache=False,
+        cpu_offload_gb=0,
+        enable_symm_mem=False,
+        enable_dsa_prefill_context_parallel=False,
+        enable_prefill_cp=False,
+        enable_deepseek_v4_fp4_indexer=False,
+        enable_eplb=False,
+        expert_distribution_recorder_mode=None,
+        debug_cuda_graph=False,
     )
     return args, values
 
 
 def test_config_gate_rechecks_native_vetoes_despite_explicit_lock(monkeypatch):
     import sys
-    monkeypatch.setitem(sys.modules, "sglang.srt.arg_groups.overrides", NS(resolved_view=lambda a: a._resolved()))
-    monkeypatch.setitem(sys.modules, "sglang.srt.configs.model_config", NS(is_deepseek_v4=lambda c: True))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.arg_groups.overrides",
+        NS(resolved_view=lambda a: a._resolved()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.configs.model_config",
+        NS(is_deepseek_v4=lambda c: True),
+    )
     source = native_rule_source()
-    validator = fp.audited_native_validator(source, {
-        "Backend": NS(DISABLED="disabled"),
-        "logger": NS(warning=lambda *a: None),
-    })
+    validator = fp.audited_native_validator(
+        source,
+        {
+            "Backend": NS(DISABLED="disabled"),
+            "logger": NS(warning=lambda *a: None),
+        },
+    )
     intent = FlashPrefillIntent("breakable", (512, 1024), 4)
     args, values = config_args()
     receipt = fp.validate_capture_request(args, intent, native_validator=validator)
@@ -419,43 +517,68 @@ def test_config_gate_rechecks_native_vetoes_despite_explicit_lock(monkeypatch):
         fp.audited_native_validator(source.replace("LoRA", "changed"), {})
 
 
-@pytest.mark.parametrize("field,value", [
-    ("device", "cpu"), ("tp_size", 2), ("dp_size", 8), ("pp_size", 2),
-    ("disable_overlap_schedule", False), ("enable_two_batch_overlap", True),
-    ("enable_memory_saver", True), ("speculative_algorithm", "EAGLE"),
-    ("disaggregation_mode", "prefill"), ("enable_torch_compile", True),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("device", "cpu"),
+        ("tp_size", 2),
+        ("dp_size", 8),
+        ("pp_size", 2),
+        ("disable_overlap_schedule", False),
+        ("enable_two_batch_overlap", True),
+        ("enable_memory_saver", True),
+        ("speculative_algorithm", "EAGLE"),
+        ("disaggregation_mode", "prefill"),
+        ("enable_torch_compile", True),
+    ],
+)
 def test_capture_scope_rejects_unqualified_paths(field, value):
     args, _ = config_args()
     setattr(args, field, value)
     with pytest.raises(ValueError):
-        fp.validate_capture_request(args, FlashPrefillIntent("breakable", (512, 1024), 4), native_validator=lambda a: None)
+        fp.validate_capture_request(
+            args,
+            FlashPrefillIntent("breakable", (512, 1024), 4),
+            native_validator=lambda a: None,
+        )
 
 
 def metadata():
     import torch
+
     page = torch.arange(8, dtype=torch.int32).reshape(2, 4)
     core = NS(page_table=page)
     for name in fp.CORE_STABLE_FIELDS:
         setattr(core, name, torch.zeros(2, dtype=torch.int32))
-    indexer = NS(page_table=page, c4_seq_lens=core.c4_topk_lengths_raw,
-                 deep_gemm_metadata=torch.zeros(2), topk_metadata=torch.empty(0))
-    compress = NS(write_loc=torch.zeros(2), extra_data=None,
-                  plan=NS(indices=torch.arange(2)))
-    return NS(core_attn_metadata=core, indexer_metadata=indexer,
-              c4_compress_metadata=compress, sparse_prefill_cache=None)
+    indexer = NS(
+        page_table=page,
+        c4_seq_lens=core.c4_topk_lengths_raw,
+        deep_gemm_metadata=torch.zeros(2),
+        topk_metadata=torch.empty(0),
+    )
+    compress = NS(
+        write_loc=torch.zeros(2), extra_data=None, plan=NS(indices=torch.arange(2))
+    )
+    return NS(
+        core_attn_metadata=core,
+        indexer_metadata=indexer,
+        c4_compress_metadata=compress,
+        sparse_prefill_cache=None,
+    )
 
 
 def test_refresh_restores_page_table_alias_and_preserves_all_stable_addresses():
     old = metadata()
     original = old.indexer_metadata.page_table
     addresses = fp.metadata_addresses(old)
+
     def native_refresh():
         fresh = metadata()
         fresh.core_attn_metadata.page_table.fill_(9)
         old.core_attn_metadata.page_table = fresh.core_attn_metadata.page_table
         old.indexer_metadata.page_table.copy_(fresh.indexer_metadata.page_table)
         assert old.core_attn_metadata.page_table is not old.indexer_metadata.page_table
+
     fp.refresh_metadata(old, native_refresh)
     assert old.core_attn_metadata.page_table is original
     assert old.indexer_metadata.page_table is original
@@ -465,8 +588,10 @@ def test_refresh_restores_page_table_alias_and_preserves_all_stable_addresses():
 
 def test_refresh_rejects_reallocated_captured_tensor():
     old = metadata()
+
     def replace_storage():
         old.indexer_metadata.page_table = old.indexer_metadata.page_table.clone()
+
     with pytest.raises(RuntimeError, match="address"):
         fp.refresh_metadata(old, replace_storage)
 
@@ -485,8 +610,14 @@ def test_capture_event_retains_failure_and_requires_real_graphs():
     events = []
     calls = []
     with pytest.raises(RuntimeError, match="capture registry"):
-        fp.capture_attempt(runner, intent, lambda: calls.append("native"), emit=events.append,
-                           synchronize=lambda: calls.append("sync"), memory=lambda: {"free_bytes": 100})
+        fp.capture_attempt(
+            runner,
+            intent,
+            lambda: calls.append("native"),
+            emit=events.append,
+            synchronize=lambda: calls.append("sync"),
+            memory=lambda: {"free_bytes": 100},
+        )
     assert calls == ["native", "sync"]
     assert [e["event"] for e in events] == ["capture_enter", "capture_error"]
     assert events[-1]["error_type"] == "RuntimeError"
@@ -495,69 +626,119 @@ def test_capture_event_retains_failure_and_requires_real_graphs():
 def test_capture_receipt_reports_segments_and_propagates_oom():
     class Key:
         size = 512
-    runner = NS(backend=NS(_graphs={Key(): NS(_segments=[object(), object()])}),
-                attn_metadata_buffers={512: object()})
+
+    runner = NS(
+        backend=NS(_graphs={Key(): NS(_segments=[object(), object()])}),
+        attn_metadata_buffers={512: object()},
+    )
     intent = FlashPrefillIntent("breakable", (512,), 4)
     events = []
-    assert fp.capture_attempt(runner, intent, lambda: 42, emit=events.append,
-                              synchronize=lambda: None, memory=lambda: {}) == 42
+    assert (
+        fp.capture_attempt(
+            runner,
+            intent,
+            lambda: 42,
+            emit=events.append,
+            synchronize=lambda: None,
+            memory=lambda: {},
+        )
+        == 42
+    )
     assert events[-1]["event"] == "capture_return"
     assert events[-1]["segments"] == {512: 2}
     assert events[-1]["gpu_qualified"] is False
     assert events[-1]["actual"]["status"] == "captured"
+
     def oom():
         raise MemoryError("capture allocation")
+
     with pytest.raises(MemoryError):
-        fp.capture_attempt(runner, intent, oom, emit=events.append,
-                           synchronize=lambda: None, memory=lambda: {})
+        fp.capture_attempt(
+            runner,
+            intent,
+            oom,
+            emit=events.append,
+            synchronize=lambda: None,
+            memory=lambda: {},
+        )
     assert events[-1]["event"] == "capture_error"
 
 
 def test_installed_worker_gate_reaches_capture_and_refresh(monkeypatch):
     intent = FlashPrefillIntent("breakable", (512,), 4)
     events = []
+
     class Attention:
-        def prepare_forward_metadata_for_breakable_cuda_graph_replay(self, meta, live, **kwargs):
+        def prepare_forward_metadata_for_breakable_cuda_graph_replay(
+            self, meta, live, **kwargs
+        ):
             fresh = metadata()
             fresh.core_attn_metadata.page_table.fill_(17)
             meta.core_attn_metadata.page_table = fresh.core_attn_metadata.page_table
             meta.indexer_metadata.page_table.copy_(fresh.indexer_metadata.page_table)
             self.forward_metadata = meta
+
     class Runner:
         def capture(self):
             self.backend._graphs = {NSKey(512): NS(_segments=[object()])}
             self.attn_metadata_buffers = {512: metadata()}
             return "captured"
+
         def can_run_graph(self, batch):
             return getattr(batch, "_memt_graph_allowed", True)
+
         def execute(self, batch):
             if getattr(batch, "fail", False):
                 raise RuntimeError("native replay failure")
             self.backend.replay(NSKey(len(batch.input_ids)), batch)
             return "replayed"
+
     class ModelRunner:
         def _prepare_eager_forward_batch(self, batch):
             batch.normalized = True
+
     class NSKey:
-        def __init__(self, size): self.size = size
+        def __init__(self, size):
+            self.size = size
+
     def gather(value):
         if isinstance(value, fp.ReplayVote):
             return [replace(value, rank=i) for i in range(4)]
         return [value] * 4
-    monkeypatch.setattr(fp, "validate_capture_request", lambda *a: {"status": "capture_attempt_permitted"})
-    monkeypatch.setattr(fp, "_worker_preflight", lambda *a: {"single_c4_logits_bytes": 1})
-    fp.install_worker_hooks(intent, Runner, Attention, ModelRunner,
-                            gather=gather, rank=lambda: 0, emit=events.append,
-                            synchronize=lambda: None, memory=lambda: {},
-                            replay_observer=events.append)
+
+    monkeypatch.setattr(
+        fp,
+        "validate_capture_request",
+        lambda *a: {"status": "capture_attempt_permitted"},
+    )
+    monkeypatch.setattr(
+        fp, "_worker_preflight", lambda *a: {"single_c4_logits_bytes": 1}
+    )
+    fp.install_worker_hooks(
+        intent,
+        Runner,
+        Attention,
+        ModelRunner,
+        gather=gather,
+        rank=lambda: 0,
+        emit=events.append,
+        synchronize=lambda: None,
+        memory=lambda: {},
+        replay_observer=events.append,
+    )
     runner = Runner()
     runner.backend = NS(_graphs={}, replay=lambda *a: "backend")
-    runner.model_runner = NS(server_args=NS(), attn_backend=Attention(),
-                            model_config=NS(hf_config=NS(model_type="memt_deepseek_v4")))
+    runner.model_runner = NS(
+        server_args=NS(),
+        attn_backend=Attention(),
+        model_config=NS(hf_config=NS(model_type="memt_deepseek_v4")),
+    )
     runner.capture_num_tokens = [512]
     assert runner.capture() == "captured"
     meta = runner.attn_metadata_buffers[512]
-    runner.model_runner.attn_backend.prepare_forward_metadata_for_breakable_cuda_graph_replay(meta, object())
+    runner.model_runner.attn_backend.prepare_forward_metadata_for_breakable_cuda_graph_replay(
+        meta, object()
+    )
     assert meta.core_attn_metadata.page_table is meta.indexer_metadata.page_table
     assert meta.indexer_metadata.page_table[0, 0].item() == 17
     assert events[-1]["event"] == "capture_return"
@@ -576,28 +757,55 @@ def test_installed_worker_gate_reaches_capture_and_refresh(monkeypatch):
     with pytest.raises(RuntimeError, match="evidence"):
         runner.execute(batch)
     with pytest.raises(RuntimeError, match="already"):
-        fp.install_worker_hooks(intent, Runner, Attention, ModelRunner,
-                                gather=gather, rank=lambda: 0, emit=events.append,
-                                synchronize=lambda: None, memory=lambda: {})
+        fp.install_worker_hooks(
+            intent,
+            Runner,
+            Attention,
+            ModelRunner,
+            gather=gather,
+            rank=lambda: 0,
+            emit=events.append,
+            synchronize=lambda: None,
+            memory=lambda: {},
+        )
 
 
 def test_worker_consensus_restricts_real_normalized_batch(monkeypatch):
     intent = FlashPrefillIntent("breakable", (512,), 4)
+
     class Runner:
-        def capture(self): pass
-        def can_run_graph(self, batch): return True
-        def execute(self, batch): return "native"
+        def capture(self):
+            pass
+
+        def can_run_graph(self, batch):
+            return True
+
+        def execute(self, batch):
+            return "native"
+
     class Attention:
-        def prepare_forward_metadata_for_breakable_cuda_graph_replay(self, *a, **k): pass
+        def prepare_forward_metadata_for_breakable_cuda_graph_replay(self, *a, **k):
+            pass
+
     class ModelRunner:
         def _prepare_eager_forward_batch(self, batch):
             batch.global_num_tokens_cpu = [512] * 4
             batch.global_dp_buffer_len = 2048
+
     def gather(value):
         return [replace(value, rank=i) for i in range(4)]
-    fp.install_worker_hooks(intent, Runner, Attention, ModelRunner,
-                            gather=gather, rank=lambda: 0, emit=lambda e: None,
-                            synchronize=lambda: None, memory=lambda: {})
+
+    fp.install_worker_hooks(
+        intent,
+        Runner,
+        Attention,
+        ModelRunner,
+        gather=gather,
+        rank=lambda: 0,
+        emit=lambda e: None,
+        synchronize=lambda: None,
+        memory=lambda: {},
+    )
     mr = ModelRunner()
     runner, batch = runner_and_batch(counts=(512, 512, 512, 512))
     runner.capture_num_tokens = [512]
@@ -624,15 +832,27 @@ def test_bs32_at_512_tokens_falls_back_without_explicit_4096_gear():
 
 def test_ast_validator_retains_every_other_native_rule_and_is_nonmutating(monkeypatch):
     import sys
-    monkeypatch.setitem(sys.modules, "sglang.srt.arg_groups.overrides", NS(resolved_view=lambda a: a._resolved()))
-    monkeypatch.setitem(sys.modules, "sglang.srt.configs.model_config", NS(is_deepseek_v4=lambda c: True))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.arg_groups.overrides",
+        NS(resolved_view=lambda a: a._resolved()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.configs.model_config",
+        NS(is_deepseek_v4=lambda c: True),
+    )
     source = native_rule_source()
     before = source
     warnings = []
-    validator = fp.audited_native_validator(source, {
-        "Backend": NS(DISABLED="disabled"),
-        "logger": NS(warning=lambda *args: warnings.append(args)),
-    })
+    validator = fp.audited_native_validator(
+        source,
+        {
+            "Backend": NS(DISABLED="disabled"),
+            "logger": NS(warning=lambda *args: warnings.append(args)),
+        },
+    )
     for kind in ("mla", "cp", "dcp", "lora_paths", "lora", "a2a", "multimodal"):
         args, values = config_args()
         if kind == "mla":
@@ -648,8 +868,11 @@ def test_ast_validator_retains_every_other_native_rule_and_is_nonmutating(monkey
         elif kind == "a2a":
             values["moe_a2a_backend"] = "deepep"
         elif kind == "multimodal":
-            args.get_model_config = lambda: NS(hf_config=NS(), is_multimodal=True,
-                                               is_multimodal_breakable_cuda_graph_supported=False)
+            args.get_model_config = lambda: NS(
+                hf_config=NS(),
+                is_multimodal=True,
+                is_multimodal_breakable_cuda_graph_supported=False,
+            )
         validator(args)
         assert args.cuda_graph_config.prefill.backend == "disabled", kind
     assert len(warnings) == 7
@@ -659,12 +882,16 @@ def test_ast_validator_retains_every_other_native_rule_and_is_nonmutating(monkey
     with pytest.raises(ValueError, match="source"):
         fp.audited_native_validator("# comment\n" + source, {})
     with pytest.raises(ValueError, match="source"):
-        fp.audited_native_validator(source.replace("self.dcp_size > 1", "self.dcp_size > 2"), {})
+        fp.audited_native_validator(
+            source.replace("self.dcp_size > 1", "self.dcp_size > 2"), {}
+        )
 
 
 def test_rule_source_identity_never_depends_on_python_ast_serialization(monkeypatch):
     source = native_rule_source()
-    monkeypatch.setattr(fp.ast, "dump", lambda *a, **kw: pytest.fail("version-dependent AST hash"))
+    monkeypatch.setattr(
+        fp.ast, "dump", lambda *a, **kw: pytest.fail("version-dependent AST hash")
+    )
     fp.audited_native_validator(source, {})
 
 
@@ -675,13 +902,18 @@ def test_config_mismatch_and_missing_explicit_locks_fail():
         if kind == "locks":
             args._cuda_graph_config_locked = set()
         else:
-            setattr(args.cuda_graph_config.prefill, kind, "disabled" if kind == "backend" else [512] if kind == "bs" else 512)
+            setattr(
+                args.cuda_graph_config.prefill,
+                kind,
+                "disabled" if kind == "backend" else [512] if kind == "bs" else 512,
+            )
         with pytest.raises(ValueError, match="resolved"):
             fp.validate_capture_request(args, intent, native_validator=lambda a: None)
 
 
 def test_worker_preflight_source_geometry_and_headroom(monkeypatch):
     import torch
+
     intent = FlashPrefillIntent("breakable", (512, 1024), 4)
     runner, _ = runner_and_batch(counts=(512,) * 4)
     runner.require_mlp_tp_gather = True
@@ -693,11 +925,19 @@ def test_worker_preflight_source_geometry_and_headroom(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.version, "hip", None)
     monkeypatch.setattr(fp.inspect, "getfile", lambda cls: __file__)
-    monkeypatch.setattr(fp, "_DSV4_SOURCE_SHA", fp.hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+    monkeypatch.setattr(
+        fp,
+        "_DSV4_SOURCE_SHA",
+        fp.hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    )
+
     def memory():
         return {"free_bytes": 2**30}
 
-    assert fp._worker_preflight(runner, intent, memory)["single_c4_logits_bytes"] == 33554432
+    assert (
+        fp._worker_preflight(runner, intent, memory)["single_c4_logits_bytes"]
+        == 33554432
+    )
     attn.c4_topk = 1024
     with pytest.raises(ValueError, match="layout"):
         fp._worker_preflight(runner, intent, memory)
@@ -718,15 +958,22 @@ def test_one_rank_preflight_rejection_prevents_native_capture(monkeypatch):
     class Runner:
         def capture(self):
             raise AssertionError("native capture must not start")
+
     intent = FlashPrefillIntent("breakable", (512,), 4)
     events = []
     monkeypatch.setattr(fp, "validate_capture_request", lambda *a: {})
-    def reject(*a): raise ValueError("insufficient headroom")
+
+    def reject(*a):
+        raise ValueError("insufficient headroom")
+
     monkeypatch.setattr(fp, "_worker_preflight", reject)
-    fp._install_capture_hook(intent, Runner, lambda v: [v] * 4, events.append,
-                             lambda: None, lambda: {})
+    fp._install_capture_hook(
+        intent, Runner, lambda v: [v] * 4, events.append, lambda: None, lambda: {}
+    )
     runner = Runner()
-    runner.model_runner = NS(server_args=NS(), model_config=NS(hf_config=NS(model_type="memt_deepseek_v4")))
+    runner.model_runner = NS(
+        server_args=NS(), model_config=NS(hf_config=NS(model_type="memt_deepseek_v4"))
+    )
     with pytest.raises(RuntimeError, match="preflight"):
         runner.capture()
     assert events[-1]["event"] == "capture_preflight_rejected"
@@ -734,20 +981,32 @@ def test_one_rank_preflight_rejection_prevents_native_capture(monkeypatch):
 
 def test_rank_eligibility_exception_is_collected_before_abort(monkeypatch):
     class Runner:
-        def can_run_graph(self, batch): raise ValueError("native veto crashed")
+        def can_run_graph(self, batch):
+            raise ValueError("native veto crashed")
+
     class ModelRunner:
-        def _prepare_eager_forward_batch(self, batch): pass
+        def _prepare_eager_forward_batch(self, batch):
+            pass
+
     runner, batch = runner_and_batch(counts=(512,) * 4)
     runner._memt_flash_capture_complete = True
     mr = ModelRunner()
     mr.model_config = NS(hf_config=NS(model_type="memt_deepseek_v4"))
     mr.prefill_cuda_graph_runner = runner
     events, gathered = [], []
+
     def gather(v):
         gathered.append(v)
         return [replace(v, rank=i) for i in range(4)]
-    fp._install_replay_consensus(FlashPrefillIntent("breakable", (512, 1024), 4),
-                                 Runner, ModelRunner, gather, lambda: 0, events.append)
+
+    fp._install_replay_consensus(
+        FlashPrefillIntent("breakable", (512, 1024), 4),
+        Runner,
+        ModelRunner,
+        gather,
+        lambda: 0,
+        events.append,
+    )
     with pytest.raises(RuntimeError, match="eligibility"):
         mr._prepare_eager_forward_batch(batch)
     assert len(gathered) == 1
@@ -757,13 +1016,21 @@ def test_rank_eligibility_exception_is_collected_before_abort(monkeypatch):
 def test_capture_records_sampled_headroom_without_claiming_peak_bound():
     class Key:
         size = 512
-    runner = NS(backend=NS(_graphs={Key(): NS(_segments=[object()])}),
-                attn_metadata_buffers={512: object()})
+
+    runner = NS(
+        backend=NS(_graphs={Key(): NS(_segments=[object()])}),
+        attn_metadata_buffers={512: object()},
+    )
     observations = iter([{"free_bytes": 1000}, {"free_bytes": 800}])
     events = []
-    fp.capture_attempt(runner, FlashPrefillIntent("breakable", (512,), 4),
-                       lambda: None, emit=events.append, synchronize=lambda: None,
-                       memory=lambda: next(observations))
+    fp.capture_attempt(
+        runner,
+        FlashPrefillIntent("breakable", (512,), 4),
+        lambda: None,
+        emit=events.append,
+        synchronize=lambda: None,
+        memory=lambda: next(observations),
+    )
     assert events[-1]["sampled_min_free_bytes"] == 800
     assert events[-1]["free_delta_bytes"] == 200
     assert events[-1]["peak_scope"] == "process_lifetime"
@@ -773,11 +1040,15 @@ def test_runner_return_without_backend_replay_is_not_success():
     class Runner:
         def execute(self, batch):
             return "eager-only"
+
     events = []
     fp._install_execute_evidence(Runner, events.append)
     runner = Runner()
-    runner.model_runner = NS(model_config=NS(hf_config=NS(model_type="memt_deepseek_v4")))
+    runner.model_runner = NS(
+        model_config=NS(hf_config=NS(model_type="memt_deepseek_v4"))
+    )
     runner._memt_flash_capture_complete = True
+
     def original(*a):
         return None
 

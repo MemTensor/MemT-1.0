@@ -54,12 +54,8 @@ def native_model_boundary(monkeypatch):
     def topk_v2(*args, **kwargs):
         return "native-v2", args, kwargs
 
-    native = SimpleNamespace(
-        topk_transform_512=topk_v1, topk_transform_512_v2=topk_v2
-    )
-    indexer = SimpleNamespace(
-        topk_transform_512=topk_v1, topk_transform_512_v2=topk_v2
-    )
+    native = SimpleNamespace(topk_transform_512=topk_v1, topk_transform_512_v2=topk_v2)
+    indexer = SimpleNamespace(topk_transform_512=topk_v1, topk_transform_512_v2=topk_v2)
 
     class NativeModel:
         def __init__(self, config, quant_config=None, prefix=""):
@@ -69,7 +65,8 @@ def native_model_boundary(monkeypatch):
             self.quant_config = quant_config
             self.prefix = prefix
             self.topk_at_init = (
-                indexer.topk_transform_512, indexer.topk_transform_512_v2
+                indexer.topk_transform_512,
+                indexer.topk_transform_512_v2,
             )
 
     # Import the real MemT model, replacing only GPU/model-loading boundaries.
@@ -89,9 +86,7 @@ def native_model_boundary(monkeypatch):
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
-    return SimpleNamespace(
-        native=native, indexer=indexer, originals=(topk_v1, topk_v2)
-    )
+    return SimpleNamespace(native=native, indexer=indexer, originals=(topk_v1, topk_v2))
 
 
 @pytest.mark.parametrize("legacy_flag", [None, "0", "1", "true"])

@@ -18,104 +18,26 @@ The scripts provide one runnable starting configuration. They have not been deep
 - [Checkpoint and snapshot formats](#checkpoint-and-snapshot-formats)
 - [Licensing](#licensing)
 
-### Extra requirement for the Flash memory decode graph
+### Decode graph and numerical policy
 
-`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` captures the memory-read path into the
-decode CUDA graph. It is the single change responsible for the decode speedups in this package,
-and it has more preconditions than any other switch here, so the complete set is
-given as one copy-pasteable block rather than described piecemeal.
-
-**The overlay is a separate deliverable.** Every capability below is probed by an
-explicit API-version constant, not by `hasattr`, so a missing constant fails at
-startup instead of degrading quietly. Put the overlay ahead of site-packages:
+Fast arithmetic is the default. Deterministic arithmetic is optional; tensor
+ownership and buffer safety apply to both modes. See [dependency installation](docs/SGLANG_DEPENDENCY.md)
+and [validation scope](docs/VALIDATION.md).
 
 ```bash
-export PYTHONPATH=/path/to/sglang-flash-release-v2:$PYTHONPATH
-```
-
-#### Complete switch set
-
-```bash
-# Required: turn the graph on, and keep the reader it captures.
 export MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1
-export MEMT_EXPERIMENT_SLOT_READ=1
-
-# Required: replay-consistency. Capture records device addresses and control
-# flow once; every replay re-executes those nodes, so anything that could pick a
-# different KV row on replay must be pinned before capture happens.
-export MEMT_EXPERIMENT_C4_STABLE_TOPK=1          # stable top-k tie-break
-export MEMT_EXPERIMENT_PADDED_DECODE_QUERY=1     # fixed decode geometry
-export MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY=1   # KV capacity not clipped
-export SGLANG_DSV4_PIN_DECODE_INTERMEDIATES=1    # keep captured tensor owners
-export SGLANG_DSV4_DETERMINISTIC_PROFILE=1       # see the note below
-
-# Overlay defaults; listed because they participate in the same check.
-export SGLANG_OPT_USE_TILELANG_MHC_PRE=1
-export SGLANG_OPT_DEEPGEMM_HC_PRENORM=1
+# Reader, padded geometry and stable C4 defaults are resolved by the launcher.
+python -m memt_sglang.launch --model-path MODEL_PATH \
+  --cuda-graph-config '{"prefill":{"backend":"disabled"},"decode":{"backend":"breakable"}}'
 ```
 
-Then start the server with a breakable decode graph:
-
-```bash
---cuda-graph-config '{"prefill":{"backend":"disabled"},"decode":{"backend":"breakable","bs":[1,2,3,4,7,8,16,24,32],"max_bs":32}}'
-```
-
-Overlap scheduling and PDMux must be off; the graph is rejected at startup if
-either is enabled.
-
-#### Why `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` alone is not enough
-
-The overlay computes
-
-```python
-_pin_decode_graph_owners = (
-    SGLANG_DSV4_DETERMINISTIC_PROFILE and SGLANG_DSV4_PIN_DECODE_INTERMEDIATES
-)
-```
-
-so **both** must be set for the captured tensors to actually be retained. This
-package requires both, and the error message names whichever one is missing.
-Setting only the second produces a graph that captures and replays without error
-while reading from tensor storage it never retained — measured at a
-maximum-case target-logprob p99 above 0.1, against 0.000724 when pinning is on.
-
-#### Success signal
-
-The server log must contain, once per rank:
-
-```
-MemT memory decode captured: local buckets=[...], graph segments=[1], native tensor owners=N
-```
-
-`graph segments=[1]` for **every** bucket is the check that matters. A `2` or
-higher means a graph break occurred — most likely a Python callback re-entered
-during capture — and the graph is only partially recorded. This is not an error
-condition the server reports; it simply runs slower.
-
-#### Failure modes and what they mean
-
-| Message | Cause |
-| --- | --- |
-| `... requires the separately supplied SGLang stable exact top-k API v1` | Overlay absent from `PYTHONPATH`, or an older overlay |
-| `... requires these switches to be set exactly; missing or wrong: <names>` | One of the block above is unset or set to `0`; the message names it |
-| `Memory decode graph requires breakable decode and SLOT_READ=1` | `--cuda-graph-config` decode backend is `disabled`, or `SLOT_READ` is off |
-| `Memory decode graph requires overlap scheduling disabled` | `--disable-overlap-schedule` not passed, or an overlap flag is set |
-| `MemT stable C4 profile currently validates CUDA SM103 only` | Not an SM103 (B300-class) device. The kernel itself carries no architecture branch; the gate is a qualification limit, not a hardware requirement |
-
-Numerical reproducibility is a separate, explicitly chosen tier:
-
-Numerical reproducibility is a separate, explicitly chosen tier:
-
-| `MEMT_NUMERICS` | What it guarantees | Cost measured on Nano |
-| --- | --- | --- |
-| `fast` (default) | Correct results; the same request may answer differently depending on what else is in the batch | baseline |
-| `strict` | The same request reproduces across rounds at concurrency 32 | +7.7% (C1) to +16.6% (C32) TPOT |
-
-Counts behind that row, 10 rounds of greedy 256-token responses from one frozen
-initial state: at concurrency 32, `strict` reproduced 288/288 request-pairs and
-`fast` 256/288 (88.9%). At concurrency 1 both reproduced 288/288. Choosing `fast`
-while also passing `--enable-deterministic-inference` or any `SGLANG_DSV4_*`
-profile switch is a startup error rather than a silent downgrade.
+The supplied Flash dependency patch is required. Stable C4 is the reference
+selection implementation used by this adapter; CUDA graphs themselves permit
+changing index values at replay. Graph ownership does not require deterministic
+arithmetic. Explicit incompatible settings produce an actionable error.
+Native overlap and PDMux remain unsupported with memory graphs until their
+lifecycle integration is validated. GPU architecture qualification is reported
+separately from actual kernel capability requirements.
 
 ## Installation
 
@@ -154,35 +76,12 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
   --port 30001 --state-directory /data/memt-state
 ```
 
-### Recommended combinations (measured, not claimed)
+### Performance and configuration
 
-Each row was run for ten rounds on the frozen initial state, concurrency 1 and
-32, 512-token queries, TPOT in ms per token. Rows name the switches that were on.
-
-| Model | Enabled | Numerics | C1 TPOT | C32 TPOT | Verdict |
-| --- | --- | --- | ---: | ---: | --- |
-| Nano | metadata cache, slot read, decode graph | `strict` | 7.48 | 10.98 | recommended |
-| Nano | same | `fast` | 7.48 | 10.98 | 7.7% / 16.6% faster off a different baseline; see the tier table above |
-| Nano | same + prefill graph | `strict` | 9.04 | 11.59 | **not recommended**: 21% slower |
-| Flash | metadata cache, slot read, decode graph | `strict` | 28.12 | 32.48 | recommended |
-| Flash | same | `fast` | 16.60 | 22.58 | 41% / 31% faster, but see the reproducibility table |
-| Flash | same + prefill graph | `strict` | 28.92 | 36.70 | **not recommended**: 3% / 13% slower |
-
-Two findings worth stating plainly:
-
-- **The prefill graph did not pay off here.** Nano and Flash both entered the
-  graph (capture confirmed in the server log) and both produced token-identical
-  output, but both ran slower. For Flash this is expected: the graph is only
-  entered when a rank's token count lands exactly on a captured gear, which
-  concurrent traffic rarely does.
-- **`fast` on Flash trades away reproducibility at concurrency 32**, not just a
-  few trailing bits: 100% of request-pairs reproduced under `strict`, 38-42%
-  under `fast`, first divergence at token 4. Keep `strict` unless the workload
-  genuinely tolerates different answers for the same request.
-
-Not in this table because there is no measurement behind it: overlap, query
-chunking, query coalescing, and partial commit. Treat those as unsupported for
-production use until someone runs them.
+See [validation scope](docs/VALIDATION.md) for measured configurations and limitations.
+Use distinct prompts at concurrency and preserve the same non-empty initial state
+when comparing versions. Prefill graphs, overlap and attention TP are separate
+integration work; they are not enabled by the decode graph example.
 
 ### Example script settings
 
@@ -593,52 +492,12 @@ Snapshots are server-side `.safetensors` files under `--state-directory`. Each m
 
 Metadata contains `format=memt-memory-v1` and `identity=<HF Session identity>`. The identity covers backbone configuration, memory configuration, native encoding, chat template and tokenizer vocabulary. Initialized files contain `memory.<layer>` FP32 tensors with shape `[1, heads, K, V]`; empty HF memories contain no tensors. Identity, layer set, dtype and shape are checked before import. Transfer the file into the server's `--state-directory` to load an HF snapshot by name; server exports can be loaded by HF with the same model/tokenizer. Older SGLang files using `memory.layers.<layer>` and `model`/`encoding` metadata are incompatible with this format. Snapshots contain published memory only, without the conversation transcript or native KV cache.
 
-## Numeric verification
+## Validation
 
-The memory decode graph changes **when** the memory-read kernels are launched, not **what** they compute. That claim was measured rather than asserted.
-
-### Setup
-
-Two arms, same tree, same frozen memory snapshot, same prompt, greedy decoding. The only difference is `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH`. All five replay-consistency switches listed above are set in **both** arms, so the comparison isolates the graph and does not mix in the stable-top-k cost.
-
-The arms really do differ — verified from the server log, not assumed:
-
-| | graph off | graph on |
-| --- | --- | --- |
-| `Capture target decode CUDA graph` lines | 0 | 8 |
-| `graph segments=[...]` | none | 6 captures, **all `[1]`** (single-segment) |
-
-### Next-token logits, first 128 decode steps
-
-Logits are stored as float32 (storing bf16 would quantise away the very difference being measured), compared over the full 129,280-token vocabulary.
-
-| Metric | bs=1 (1 session × 128 steps) | bs=32 (32 sessions × 128 steps) |
-| --- | --- | --- |
-| L2 relative error `‖on−off‖₂/‖off‖₂` | **0.000e+00** (max 0) | **0.000e+00** (max 0) |
-| Pearson correlation | **1.000000** (min 1.0) | **1.000000** (min 1.0) |
-| top-1 agreement | **128/128** | **4096/4096** |
-
-*Corrected 2026-11-01.* An earlier version of this table reported bs=32 as "4 DP ranks × 128 steps". The capture probe keyed rows by the first field of the request id, which is the constant `memt`, so all sessions on a rank shared one bucket and the comparison covered only the first 16 steps of the 32 sessions. The probe now keys by session; the numbers above are a re-measurement covering all 32 sessions for the full 128 steps, and bs=1 now covers 128 steps instead of 118. The conclusion (bit-identical) is unchanged; its coverage is now what the table says.
-
-`0` here means **bit-identical**, not "a small error". That is the expected result: same weights, same inputs, same deterministic path — the graph only changes the launch schedule.
-
-Boundaries worth stating explicitly: this covers bs=1 and bs=32 buckets on Flash, decode only. The other buckets are separate graphs and were not compared one by one (their capture logs are `segments=[1]` as well). Nano uses a different graph implementation and was not measured.
-
-### LocoMo, end to end
-
-The evaluation chain originally drove vLLM; only the engine was replaced, and the artefacts handed to the official offline scorer are unchanged in format, so the scorer runs as-is.
-
-| | graph off | graph on |
-| --- | --- | --- |
-| Instances | 1540 / 1540 | 1540 / 1540 |
-| **Aggregate category score** | **2.9714** | **2.9714** |
-| Aggregate F1 | 0.26042 | 0.25987 |
-| Output quality gate | passed | passed |
-
-The category score is identical to every printed digit. F1 differs by 5.5e-4 (0.21%) — that is a difference in the generated text of a 512-token-per-answer evaluation, not a short-range numeric divergence, since the 128-step logits above are bit-identical. Both arms hit the token limit on exactly 1 of 1540 questions, so neither is truncated-dominated.
-
-**Upstream defect found while running this.** With `--enable-deterministic-inference`, SGLang picks the sampling path for the whole *step* (`is_all_greedy = all(top_k <= 1 for r in reqs)`). A commit request generates nothing but still carries sampling parameters; if it keeps the server defaults it makes any step that mixes a commit with a query non-greedy, and the non-greedy gumbel path asserts `seed.shape == positions.shape` in `murmur_hash32` and kills the scheduler. Workaround here: commits use the same greedy parameters. This is upstream behaviour, not something these patches introduce, and it is worth reporting there.
-
+See [validation scope](docs/VALIDATION.md). Tests under `tests/` cover lifecycle
+and configuration regressions and are excluded from the installed package.
+Hardware qualification requires GPU capture/replay and numerical comparisons;
+CPU tests alone do not establish model quality or performance.
 
 ## Licensing
 

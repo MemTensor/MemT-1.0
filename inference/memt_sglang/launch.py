@@ -56,11 +56,20 @@ def _flash_prefill_config(rest, graph):
 
 
 def _unobserved_flash_actual():
-    return {"status": "not_observed", "backend": None,
-            "evidence": "worker capture events; replay_counters(runner); optional replay_observer"}
+    return {
+        "status": "not_observed",
+        "backend": None,
+        "evidence": "worker capture events; replay_counters(runner); optional replay_observer",
+    }
 
 
 def prepare(argv):
+    # A graph request selects its reader and reference geometry by default.
+    # Explicit incompatible choices are preserved so validation can explain them.
+    if enabled("MEMORY_DECODE_GRAPH"):
+        for name in ("SLOT_READ", "PADDED_DECODE_QUERY", "C4_STABLE_TOPK"):
+            os.environ.setdefault("MEMT_EXPERIMENT_" + name, "1")
+        os.environ.setdefault("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1")
     for feature in (
         "METADATA_CACHE",
         "SLOT_READ",
@@ -110,7 +119,9 @@ def prepare(argv):
         config, json.loads(options.json_model_override_args), capacity_overrides
     )
     graph = {
-        phase: {"backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"}
+        phase: {
+            "backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"
+        }
         for phase in ("prefill", "decode")
     }
     options.flash_prefill_intent = None
@@ -161,8 +172,10 @@ def prepare(argv):
         identity["flash_prefill"] = {
             "requested_backend": intent.requested_backend,
             "requested_capture_tokens": list(intent.capture_tokens),
-            "resolved_backend": None, "resolved_capture_tokens": None,
-            "status": "not_resolved", "gpu_qualified": False,
+            "resolved_backend": None,
+            "resolved_capture_tokens": None,
+            "status": "not_resolved",
+            "gpu_qualified": False,
             "actual": _unobserved_flash_actual(),
         }
     if options.deterministic_communication:
@@ -211,21 +224,40 @@ def resolve_flash_prefill(options, args, identity):
     receipt = prefill_identity(intent, phase)
     if phase.backend != "disabled":
         if intent.requested_backend != "breakable":
-            raise ValueError("Flash prefill resolved enabled without an explicit request")
+            raise ValueError(
+                "Flash prefill resolved enabled without an explicit request"
+            )
         receipt = validate_capture_request(args, intent)
-        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps({
-            "requested_backend": intent.requested_backend,
-            "capture_tokens": list(intent.capture_tokens), "dp_size": intent.dp_size,
-        })
-    return {**identity, "flash_prefill": {
-        **receipt, "resolved_dp_size": args.dp_size, "actual": _unobserved_flash_actual(),
-    }}
+        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps(
+            {
+                "requested_backend": intent.requested_backend,
+                "capture_tokens": list(intent.capture_tokens),
+                "dp_size": intent.dp_size,
+            }
+        )
+    return {
+        **identity,
+        "flash_prefill": {
+            **receipt,
+            "resolved_dp_size": args.dp_size,
+            "actual": _unobserved_flash_actual(),
+        },
+    }
 
 
 def emit_flash_prefill_event(event):
     """Worker stdout evidence, separate from the parent's unresolved actual state."""
-    print(json.dumps({**event, "component": "memt_flash_prefill", "pid": os.getpid(),
-                      "gpu_qualified": False}), flush=True)
+    print(
+        json.dumps(
+            {
+                **event,
+                "component": "memt_flash_prefill",
+                "pid": os.getpid(),
+                "gpu_qualified": False,
+            }
+        ),
+        flush=True,
+    )
 
 
 def bootstrap(*, worker=True, replay_observer=None):
@@ -259,10 +291,14 @@ def bootstrap(*, worker=True, replay_observer=None):
         )
 
         payload = json.loads(request)
-        intent = FlashPrefillIntent(payload["requested_backend"],
-                                    tuple(payload["capture_tokens"]), payload["dp_size"])
-        install_native_worker(intent, emit=emit_flash_prefill_event,
-                              replay_observer=replay_observer)
+        intent = FlashPrefillIntent(
+            payload["requested_backend"],
+            tuple(payload["capture_tokens"]),
+            payload["dp_size"],
+        )
+        install_native_worker(
+            intent, emit=emit_flash_prefill_event, replay_observer=replay_observer
+        )
 
 
 def run_scheduler(*args, **kwargs):

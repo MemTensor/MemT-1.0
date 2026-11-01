@@ -54,9 +54,8 @@ def _decode_ladder(maximum):
 def _warmup_decode_batches(server_args, dp_size):
     """Batch sizes to warm, derived from what the server can actually admit.
 
-    The ceiling is per rank: under DP attention `max_running_requests` is a
-    per-rank number, at dp_size=1 it is global. Warming a batch the scheduler
-    can never form costs startup time and proves nothing.
+    max_running_requests is the global admission budget. DP attention divides
+    it across ranks; round up to cover the largest local shard.
     """
     requested = server_args.max_running_requests or _DEFAULT_DECODE_CEILING
     maximum = max(1, (requested + dp_size - 1) // dp_size)

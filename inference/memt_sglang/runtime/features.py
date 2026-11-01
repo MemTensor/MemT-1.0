@@ -35,9 +35,8 @@ def partial_decode_quanta():
 
 
 NUMERICS_TIERS = ("auto", "fast", "strict")
-# Switches that exist to keep results independent of batch composition. E1
-# measured their cost on Nano (7.7% C1 / 16.6% C32 TPOT) and what they buy
-# (round-to-round reproducibility at concurrency 32: 100% on, 88.9% off).
+# These switches select the optional DSV4 reproducibility profile. Tensor
+# lifetime and replay buffer geometry are enforced independently of this policy.
 STRICT_NUMERICS_SWITCHES = (
     "SGLANG_DSV4_DETERMINISTIC_PROFILE",
     "SGLANG_DSV4_MHC_FIXED_SPLITS",
@@ -60,7 +59,9 @@ def numerics_tier(*, environment=None, args=None):
     if value != "auto":
         return value
     requested = strict_numerics_pending(environment=environment)
-    flag = bool(getattr(args, "enable_deterministic_inference", False)) if args else False
+    flag = (
+        bool(getattr(args, "enable_deterministic_inference", False)) if args else False
+    )
     return "strict" if (requested or flag) else "fast"
 
 
@@ -68,12 +69,15 @@ def strict_numerics_pending(*, environment=None):
     """Switches the operator asked for that `fast` would otherwise silently ignore.
 
     Only the DSV4 profile belongs here. PADDED_DECODE_QUERY is a replay-consistency
-    requirement (the captured decode geometry), not a numeric-etolerance choice, so
+    requirement (the captured decode geometry), not a numeric-tolerance choice, so
     it is valid -- and required -- in either tier.
     """
     environment = os.environ if environment is None else environment
-    return [name for name in STRICT_NUMERICS_SWITCHES
-            if environment.get(name) not in (None, "0", "")]
+    return [
+        name
+        for name in STRICT_NUMERICS_SWITCHES
+        if environment.get(name) not in (None, "0", "")
+    ]
 
 
 def validate_numerics_tier(args, *, environment=None):
@@ -87,11 +91,16 @@ def validate_numerics_tier(args, *, environment=None):
         # Nothing was asserted, so nothing can contradict: report and move on.
         return tier
     if tier == "strict":
-        missing = [name for name in ("SGLANG_DSV4_DETERMINISTIC_PROFILE",
-                                     "SGLANG_DSV4_MHC_FIXED_SPLITS",
-                                     "SGLANG_DSV4_ISOLATE_PREFILL_DECODE",
-                                     "SGLANG_DSV4_MOE_COMBINE_FP32")
-                   if environment.get(name) in (None, "0", "")]
+        missing = [
+            name
+            for name in (
+                "SGLANG_DSV4_DETERMINISTIC_PROFILE",
+                "SGLANG_DSV4_MHC_FIXED_SPLITS",
+                "SGLANG_DSV4_ISOLATE_PREFILL_DECODE",
+                "SGLANG_DSV4_MOE_COMBINE_FP32",
+            )
+            if environment.get(name) in (None, "0", "")
+        ]
         if missing or not flag:
             raise ValueError(
                 "MEMT_NUMERICS=strict requires --enable-deterministic-inference and %s"
@@ -102,7 +111,9 @@ def validate_numerics_tier(args, *, environment=None):
         raise ValueError(
             "MEMT_NUMERICS=fast does not accept %s; set MEMT_NUMERICS=strict to keep "
             "round-to-round reproducibility, or remove them to run faster"
-            % ", ".join(requested + (["--enable-deterministic-inference"] if flag else []))
+            % ", ".join(
+                requested + (["--enable-deterministic-inference"] if flag else [])
+            )
         )
     return tier
 
@@ -117,14 +128,9 @@ def validate_flash_decode_graph(args):
     required = (
         ("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1"),
         ("MEMT_EXPERIMENT_PADDED_DECODE_QUERY", "1"),
-        ("MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY", "1"),
-        # Owner pinning in the overlay is the AND of these two, not either alone:
-        # sglang-optin.patch sets
-        #     _pin_decode_graph_owners = DETERMINISTIC_PROFILE and PIN_...
-        # so checking only the second leaves a legal configuration that silently
-        # skips the retained-owner assertion and reads storage it never kept.
+        # The supplied overlay retains captured tensors independently of the
+        # optional deterministic arithmetic profile.
         ("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1"),
-        ("SGLANG_DSV4_DETERMINISTIC_PROFILE", "1"),
         ("SGLANG_OPT_USE_TILELANG_MHC_PRE", "1"),
         ("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "1"),
     )

@@ -42,7 +42,6 @@ class StableC4Tests(unittest.TestCase):
             for key in (
                 "SGLANG_DSV4_PIN_DECODE_INTERMEDIATES",
                 "MEMT_EXPERIMENT_PADDED_DECODE_QUERY",
-                "MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY",
             ):
                 with patch.dict(os.environ, {key: "0"}):
                     with self.assertRaises(ValueError):
@@ -66,7 +65,7 @@ class StableC4Tests(unittest.TestCase):
                 side_effect=lambda name: native if name.endswith(".topk") else NS(),
             ),
         ):
-            with self.assertRaisesRegex(ValueError, "complete isolated"):
+            with self.assertRaisesRegex(ValueError, "tensor ownership"):
                 stable_c4.install({"index_topk": 512})
 
     def test_missing_native_api_is_an_explicit_error(self):
@@ -164,10 +163,10 @@ class StableC4ArchitectureGateTests(unittest.TestCase):
                 logger.removeHandler(handler)
             return [r.getMessage() for r in records if r.levelno >= logging.WARNING]
 
-    def test_unqualified_device_is_refused_by_default(self):
-        # No override set: the qualified set decides, and 9.0 is not in it.
-        os.environ.pop(stable_c4.ARCH_OVERRIDE_VARIABLE, None)
-        self._install((9, 0), {}, raises="qualified on")
+    def test_unqualified_device_runs_with_warning_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            logs = self._install((9, 0), {})
+        self.assertTrue(logs)
 
     def test_override_admits_one_explicit_capability(self):
         logs = self._install((9, 0), {stable_c4.ARCH_OVERRIDE_VARIABLE: "9.0"})
@@ -189,7 +188,9 @@ class StableC4ArchitectureGateTests(unittest.TestCase):
 
     def test_override_list_rejects_unlisted_capability(self):
         self._install(
-            (10, 0), {stable_c4.ARCH_OVERRIDE_VARIABLE: "9.0,10.3"}, raises="qualified on"
+            (10, 0),
+            {stable_c4.ARCH_OVERRIDE_VARIABLE: "9.0,10.3"},
+            raises="qualified on",
         )
 
     def test_width_constant_drives_the_symbol_names(self):
