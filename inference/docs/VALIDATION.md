@@ -14,7 +14,7 @@ checks of the actual owner-retention expression. The continuous-commit branch is
 separate and passes 304 tests plus 12 subtests after integrating these core fixes.
 
 The numerical matrix uses frozen adapter `c55344c`, fast arithmetic, nonzero
-published S and diverse prompts. Graph and eager arms share the same initial
+published S and a shared prompt. Graph and eager arms share the same initial
 batch composition and row order. Each session contributes 128 contiguous forced
 history positions and its complete FP32 vocabulary:
 
@@ -30,6 +30,9 @@ All 20,736 positions have finite logits, top-1 agreement 100%, relative L2 error
 zero and Pearson correlation one. Duplicate Nano TP-rank evidence is checked but
 not counted twice. These instrumented runs establish graph/eager equality under
 controlled histories; they are neither timing nor business-quality measurements.
+The numerical driver ignored its inherited DIVERSE setting: this matrix does not
+qualify concurrent distinct prompts. Separate timeline/timing collectors actually
+rotate prompts; a distinct-prompt numerical matrix remains to be collected.
 Later changes through `156373d` concern configuration, timeout, coalescing and
 capability validation; the memory tensor implementations are unchanged. They do
 not extend this numerical result to alternative selection policies.

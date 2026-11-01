@@ -74,8 +74,9 @@ Core 分支恢复 atomic writer 的状态池和事务实现，仅保留 memory g
 - Core：286 tests + 12 subtests；continuous-commit：304 tests + 12 subtests，
   lint/format 均通过。后者已同步 core 配置和控制超时修复，独立分支保留。
 - c55344c 快档完整词表 graph/eager 比较：Nano C1/C32、Flash C1/C32/C96，
-  共 20,736 个独立位置全部逐位相同。真实非空 S、不同提示、固定 token 历史；
-  数值工具不用于计时。后续未改 memory tensor 运算，仍按来源明确标记结果。
+  共 20,736 个独立位置全部逐位相同。真实非空 S、相同提示、固定 token 历史；
+  数值工具不用于计时。核对发现该 driver 未使用 DIVERSE，已纠正范围，
+  另补不同提示数值实验。后续未改 memory tensor 运算，仍按来源明确标记结果。
 - 从公开 SGLang 完整压缩包加交付补丁独立安装，156373d 的 Nano fast/strict、
   Flash fast 实权重非空 S 请求均通过。目录名 native-topk 的一次 Flash 实验被
   旧 runner 覆盖成 stable C4，已明确限制其结论，不冒称 native C4 已验收。
