@@ -59,3 +59,11 @@ NCCL kernel 时长不直接等于可消除等待。公布分类规则、未归�
 不是删除失败测试以取得通过。Core CPU 当前 282 passed，8 subtests passed。
 七个 SGLang 依赖文件从公开基础提交应用补丁后，逐文件哈希与之前独立验收的
 固定 overlay 全部一致。正式 adapter 的 GPU 回归仍待执行。
+
+`followup/continuous-commit-20261102` 保留完整 global/tail 事务、回退恢复和相关测试。
+Core 分支恢复 atomic writer 的状态池和事务实现，仅保留 memory graph 的 reader
+与生命周期适配。后续长摄入/Agent 性能研究使用明确标注的 continuous-commit 版本，
+与 atomic 对照分开记录，不能把语义差异算成图优化收益。
+
+dd5346a 的 Nano eager/graph 与 Flash graph 正在独立卡组进行非空 S 功能 smoke；
+并行启动结果只用于功能验证，不计入正式性能收益。新拆分后的 core 还需独立 GPU 回归。

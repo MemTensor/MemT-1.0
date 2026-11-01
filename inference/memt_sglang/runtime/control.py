@@ -115,32 +115,6 @@ class WorkerControl:
         self.sessions.begin(session, envelope["transaction"])
 
     def _prepare(self, envelope):
-        from memt_sglang.protocol import MemoryRequest
-        from memt_sglang.runtime.features import commit_chunk_policy
-        from memt_sglang.runtime.partial_scheduler import partial_swa_floor
-
-        request = MemoryRequest.from_rid(envelope["request_id"])
-        if request.operation == "commit" and commit_chunk_policy() != "atomic":
-            reserve = int(os.environ.get("MEMT_PARTIAL_QUERY_TOKEN_RESERVE", "4096"))
-            needed = request.length + self.scheduler.page_size + reserve
-            full = self.scheduler.max_total_num_tokens
-            swa = getattr(self.scheduler, "swa_tokens_per_layer", None)
-            swa_needed = (
-                partial_swa_floor(
-                    commit_chunk_policy(),
-                    1,
-                    self.scheduler.tree_cache.sliding_window_size,
-                    self.scheduler.page_size,
-                    reserve,
-                )
-                if swa is not None and swa > 0
-                else 0
-            )
-            if needed > full or (swa_needed and swa_needed > swa):
-                raise CapacityError(
-                    "Logical commit cannot fit full KV credits or SWA window/step "
-                    "headroom; increase capacity or lower context/chunk budget"
-                )
         self.sessions.prepare(
             envelope["request_id"],
             envelope.get("transaction"),

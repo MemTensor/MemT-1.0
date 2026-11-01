@@ -286,11 +286,7 @@ def main(argv=None):
         name: metadata.version(name) for name in ("sglang", "torch", "transformers")
     }
     identity["max_prefill_tokens"] = args.max_prefill_tokens
-    identity["max_commit_tokens"] = (
-        (args.context_length or args.max_prefill_tokens)
-        if identity["execution"]["commit_chunk_policy"] != "atomic"
-        else args.max_prefill_tokens
-    )
+    identity["max_commit_tokens"] = args.max_prefill_tokens
     from transformers import AutoTokenizer
 
     from memt_sglang.models.common.snapshot_identity import snapshot_identity

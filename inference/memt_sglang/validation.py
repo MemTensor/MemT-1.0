@@ -110,7 +110,6 @@ def validate_server_args(
     if config_file is not None:
         raise ValueError("MemT does not support --config merging")
     from memt_sglang.runtime.features import (
-        commit_chunk_policy,
         validate_graphs,
         validate_overlap,
         validate_query_chunks,
@@ -153,7 +152,7 @@ def validate_server_args(
         raise ValueError(
             "MemT-1.0-Flash requires attention TP=1 (DP attention with tp_size == dp_size)"
         )
-    minimum_prefill = 1 if commit_chunk_policy() == "global" else chunk_tokens
+    minimum_prefill = chunk_tokens
     if args.max_prefill_tokens < minimum_prefill:
         raise ValueError(f"max_prefill_tokens must be at least {minimum_prefill}")
     if Path(args.model_path).expanduser().resolve() != Path(model_path).resolve():

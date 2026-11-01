@@ -15,23 +15,19 @@ def enabled(name, *, environment=None):
 
 
 def commit_chunk_policy(*, environment=None):
+    """Reject requests for an extension that this core package does not install."""
     environment = os.environ if environment is None else environment
-    value = environment.get("MEMT_EXPERIMENT_COMMIT_CHUNK_POLICY", "atomic")
-    if value not in ("atomic", "global", "tail"):
-        raise ValueError("COMMIT_CHUNK_POLICY must be atomic, global or tail")
-    return value
+    policy = environment.get("MEMT_EXPERIMENT_COMMIT_CHUNK_POLICY", "atomic")
+    if policy != "atomic":
+        raise ValueError(
+            "Continuous commit scheduling is provided by the separate global/tail extension"
+        )
+    return policy
 
 
 def candidate_slots_per_transaction():
-    # A private replay base protects prior commits/imports in the same transaction.
-    return 1 if commit_chunk_policy() == "atomic" else 2
-
-
-def partial_decode_quanta():
-    value = os.environ.get("MEMT_PARTIAL_DECODE_QUANTA", "0")
-    if not value.isdecimal() or int(value) > 64:
-        raise ValueError("MEMT_PARTIAL_DECODE_QUANTA must be an integer from 0 to 64")
-    return int(value)
+    """The atomic writer uses one private transaction candidate."""
+    return 1
 
 
 NUMERICS_TIERS = ("auto", "fast", "strict")
@@ -175,10 +171,6 @@ def sync_graph_config(args):
                 f"MemT {phase} graph requires disabled or breakable backend"
             )
     args.cuda_graph_config = replace(graph, **phases)
-    if commit_chunk_policy() != "atomic" and phases["prefill"].backend != "disabled":
-        raise ValueError(
-            "Partial commit requires eager prefill; decode graph remains supported"
-        )
     os.environ.update(
         {
             "MEMT_EXPERIMENT_" + phase.upper() + "_GRAPH": "1"
@@ -238,15 +230,6 @@ def validate_graphs(args):
 
 def validate_query_chunks(args):
     chunk = getattr(args, "chunked_prefill_size", None)
-    policy = commit_chunk_policy()
-    if policy != "atomic":
-        if type(chunk) is not int or chunk < (2048 if policy == "tail" else 1):
-            raise ValueError("Partial commit requires a positive native token budget")
-        if any(overlap_phases()) or not args.disable_overlap_schedule:
-            raise ValueError("Partial commit requires serialized scheduler execution")
-        if args.enable_dynamic_chunking or args.schedule_policy != "fcfs":
-            raise ValueError("MemT partial commit uses its own FCFS chunk admission")
-        return
     if type(chunk) is not int or (
         chunk != -1 and not (enabled("QUERY_CHUNKS") and chunk >= 2048)
     ):
@@ -291,15 +274,7 @@ def execution_identity(args):
         )
         == "1",
         commit_chunk_policy=commit_chunk_policy(),
-        commit_semantics_version=(
-            "atomic-fresh-kv-v1"
-            if commit_chunk_policy() == "atomic"
-            else "partial-continuous-kv-private-fragment-read-v1"
-        ),
-        candidate_slots_per_transaction=candidate_slots_per_transaction(),
-        partial_decode_quanta=partial_decode_quanta(),
-        partial_query_first=os.environ.get("MEMT_PARTIAL_QUERY_FIRST", "0") == "1",
-        partial_native_reference=enabled("PARTIAL_NATIVE_REFERENCE"),
+        commit_semantics_version="atomic-fresh-kv-v1",
         prefill_overlap=prefill,
         decode_overlap=decode,
         query_coalescing=asdict(coalescing) if coalescing else None,
