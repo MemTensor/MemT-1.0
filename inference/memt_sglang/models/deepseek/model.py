@@ -20,9 +20,16 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
         if enabled("C4_STABLE_TOPK"):
             # The old canonical-order module was removed upstream; the stable
             # dispatch is what keeps capture/replay top-k tie-breaking identical.
+            from memt_sglang.runtime.stable_c4 import STABLE_TOPK_WIDTH
             from memt_sglang.runtime.stable_c4 import install as install_stable_c4
 
-            install_stable_c4({"index_topk": getattr(config, "index_topk", 512)})
+            # The fallback is the width stable_c4 itself ships a kernel for, so a
+            # config without index_topk and the installer agree by construction
+            # instead of by two copies of the same literal.
+            width = getattr(config, "index_topk", None)
+            install_stable_c4(
+                {"index_topk": STABLE_TOPK_WIDTH if width is None else width}
+            )
         if enabled("MEMORY_DECODE_GRAPH"):
             from sglang.srt.runtime_context import get_server_args
 

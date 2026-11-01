@@ -1,5 +1,88 @@
 """Shared memory forward lifecycle."""
 
+import os
+
+# Warmup shapes are a cost/coverage trade, not a property of the model: a shape
+# that is never warmed compiles on its first real use, inside a decode step, in
+# front of a request. The defaults below cover what the released profiles
+# exercise, and the variables exist because a deployment with a different
+# concurrency ceiling or context budget has a different set of "first real uses"
+# and should not have to edit this file to hit them.
+WARMUP_DECODE_VARIABLE = "MEMT_WARMUP_DECODE_BATCHES"
+WARMUP_PREFILL_VARIABLE = "MEMT_WARMUP_PREFILL_LENGTHS"
+_DEFAULT_DECODE_CEILING = 32
+_DEFAULT_PREFILL_LENGTHS = (512, 2048)
+
+
+def _parse_shape_list(variable, default):
+    raw = os.environ.get(variable, "").strip()
+    if not raw:
+        return default
+    values = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if not item.isdecimal() or int(item) < 1:
+            raise ValueError(
+                f"{variable} takes a comma list of positive integers; got {item!r}"
+            )
+        values.append(int(item))
+    if not values:
+        raise ValueError(f"{variable} was set but lists no shape")
+    return tuple(sorted(set(values)))
+
+
+def _decode_ladder(maximum):
+    """Powers of two up to `maximum`, plus `maximum` itself.
+
+    Derived rather than listed so that raising the server's concurrency ceiling
+    also raises what gets warmed. The previous fixed list stopped at 32 and was
+    additionally clamped to 32, so a server admitting 128 concurrent requests
+    compiled batches 64 and 128 on their first real use -- inside a decode step,
+    with a request waiting. At the released ceiling of 32 this returns exactly
+    the list it replaces, so measured configurations are unaffected.
+    """
+    sizes, size = [], 1
+    while size < maximum:
+        sizes.append(size)
+        size *= 2
+    sizes.append(maximum)
+    return tuple(sizes)
+
+
+def _warmup_decode_batches(server_args, dp_size):
+    """Batch sizes to warm, derived from what the server can actually admit.
+
+    The ceiling is per rank: under DP attention `max_running_requests` is a
+    per-rank number, at dp_size=1 it is global. Warming a batch the scheduler
+    can never form costs startup time and proves nothing.
+    """
+    requested = server_args.max_running_requests or _DEFAULT_DECODE_CEILING
+    maximum = max(1, (requested + dp_size - 1) // dp_size)
+    configured = _parse_shape_list(WARMUP_DECODE_VARIABLE, None)
+    if configured is None:
+        return list(_decode_ladder(maximum))
+    batches = [n for n in configured if n <= maximum]
+    # A ceiling below the smallest configured batch would leave decode
+    # completely cold, which is the failure this exists to prevent.
+    return batches or [min(maximum, min(configured))]
+
+
+def _warmup_prefill_lengths(server_args):
+    """Prefill lengths to warm, capped by the context the server will serve.
+
+    Warmup allocates `length` hidden rows at once, so a length beyond the
+    configured context length would only ever exercise a shape that cannot
+    occur.
+    """
+    configured = _parse_shape_list(WARMUP_PREFILL_VARIABLE, _DEFAULT_PREFILL_LENGTHS)
+    context = getattr(server_args, "context_length", None)
+    if not context:
+        return configured
+    kept = [n for n in configured if n <= context]
+    return kept or [min(context, min(configured))]
+
 
 class MemoryHooks:
     def setup_execution(self, *, dp_attention=False):
@@ -80,16 +163,15 @@ class MemoryHooks:
 
         start = time.monotonic()
         dp = runner.server_args.dp_size if self.dp_attention else 1
-        requested = runner.server_args.max_running_requests or 32
-        maximum = min(32, (requested + dp - 1) // dp)
-        batches = [n for n in (1, 2, 4, 8, 16, 32) if n <= maximum]
+        server_args = runner.server_args
+        decode = _warmup_decode_batches(server_args, dp)
+        prefill = _warmup_prefill_lengths(server_args)
         runtime = self.model.memt_runtime
         with torch.no_grad():
             for layer, block in self.blocks.items():
                 parameter = next(block.parameters())
-                for tokens, lengths in [(n, (1,) * n) for n in batches] + [
-                    (512, (512,)),
-                    (2048, (2048,)),
+                for tokens, lengths in [(n, (1,) * n) for n in decode] + [
+                    (n, (n,)) for n in prefill
                 ]:
                     hidden = torch.zeros(
                         (tokens, block.hidden_size),
@@ -107,8 +189,10 @@ class MemoryHooks:
                     )
             torch.cuda.synchronize()
         logging.getLogger(__name__).info(
-            "MemT tensor warmup complete: decode batches=%s, prefill=[512,2048], elapsed=%.3fs",
-            batches,
+            "MemT tensor warmup complete: decode batches=%s, prefill lengths=%s, "
+            "elapsed=%.3fs",
+            decode,
+            prefill,
             time.monotonic() - start,
         )
 
