@@ -38,8 +38,8 @@ class NumericsTierTests(unittest.TestCase):
     def test_auto_is_the_default(self):
         self.assertEqual(self.tier({}), "fast")
 
-    def test_auto_reports_strict_when_switches_are_present(self):
-        self.assertEqual(self.tier(PROFILE), "strict")
+    def test_auto_distinguishes_partial_profile_from_strict(self):
+        self.assertEqual(self.tier(PROFILE), "custom")
         self.assertEqual(self.tier({}, ON), "strict")
 
     def test_auto_never_rejects_an_existing_configuration(self):
@@ -108,3 +108,17 @@ def test_nano_strict_does_not_require_deepseek_profile(monkeypatch):
     assert features.validate_numerics_tier(ON, model="memt-nano") == "strict"
     with pytest.raises(ValueError, match="deterministic-inference"):
         features.validate_numerics_tier(OFF, model="memt-nano")
+
+
+def test_partial_flash_profile_never_claims_batch_invariance(monkeypatch):
+    monkeypatch.setenv("MEMT_NUMERICS", "auto")
+    for name in features.STRICT_NUMERICS_SWITCHES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SGLANG_DSV4_MHC_FIXED_SPLITS", "64")
+    assert features.validate_numerics_tier(OFF, model="memt-flash") == "custom"
+
+
+def test_irrelevant_flash_flags_do_not_gate_nano_fast(monkeypatch):
+    monkeypatch.setenv("MEMT_NUMERICS", "fast")
+    monkeypatch.setenv("SGLANG_DSV4_DETERMINISTIC_PROFILE", "1")
+    assert features.validate_numerics_tier(OFF, model="memt-nano") == "fast"

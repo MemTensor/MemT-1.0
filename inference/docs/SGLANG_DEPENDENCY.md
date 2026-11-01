@@ -37,3 +37,7 @@ deterministic flag and, for Flash only, resolves its DSV4 profile defaults.
 Explicit conflicting environment settings are preserved and reported as errors.
 Nano does not require DeepSeek-specific switches. Tensor ownership remains
 required in either mode; strict is not needed merely to enable a decode graph.
+
+When `MEMT_NUMERICS=auto` inherits only part of a Flash arithmetic profile, the
+reported effective tier is `custom`; it carries no batch-invariance claim.
+DeepSeek-specific flags do not change or gate Nano's numerical policy.

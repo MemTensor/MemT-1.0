@@ -41,12 +41,13 @@ STRICT_NUMERICS_SWITCHES = (
 )
 
 
-def numerics_tier(*, environment=None, args=None):
+def numerics_tier(*, environment=None, args=None, model=None):
     """Resolved numerics tier.
 
     `auto` (default) reports what the requested switches actually amount to, so a
     configuration written before this option existed keeps starting and is
-    labelled honestly. Only an explicit `fast`/`strict` can fail validation.
+    labelled honestly. Partial arithmetic profiles resolve to `custom` and make
+    no batch-invariance claim. Only an explicit `fast`/`strict` can fail validation.
     """
     environment = os.environ if environment is None else environment
     value = environment.get("MEMT_NUMERICS", "auto")
@@ -54,11 +55,17 @@ def numerics_tier(*, environment=None, args=None):
         raise ValueError("MEMT_NUMERICS must be one of %s" % (NUMERICS_TIERS,))
     if value != "auto":
         return value
-    requested = strict_numerics_pending(environment=environment)
+    requested = (
+        [] if model == "memt-nano" else strict_numerics_pending(environment=environment)
+    )
     flag = (
         bool(getattr(args, "enable_deterministic_inference", False)) if args else False
     )
-    return "strict" if (requested or flag) else "fast"
+    if model == "memt-nano" or (model is None and not requested):
+        return "strict" if flag else "fast"
+    if flag and len(requested) == len(STRICT_NUMERICS_SWITCHES):
+        return "strict"
+    return "custom" if requested or flag else "fast"
 
 
 def strict_numerics_pending(*, environment=None):
@@ -79,10 +86,12 @@ def strict_numerics_pending(*, environment=None):
 def validate_numerics_tier(args, *, environment=None, model=None):
     """Reject a strict-only request made under `fast` instead of dropping it silently."""
     environment = os.environ if environment is None else environment
-    requested = strict_numerics_pending(environment=environment)
+    requested = (
+        [] if model == "memt-nano" else strict_numerics_pending(environment=environment)
+    )
     flag = bool(getattr(args, "enable_deterministic_inference", False))
     declared = environment.get("MEMT_NUMERICS", "auto")
-    tier = numerics_tier(environment=environment, args=args)
+    tier = numerics_tier(environment=environment, args=args, model=model)
     if declared == "auto":
         # Nothing was asserted, so nothing can contradict: report and move on.
         return tier
