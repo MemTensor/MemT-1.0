@@ -122,6 +122,23 @@ def prepare(argv):
         json.dumps({"memt_runtime": runtime}),
         *rest,
     ]
+    strict_requested = (
+        os.environ.get("MEMT_NUMERICS") == "strict"
+        or "--enable-deterministic-inference" in engine
+    )
+    if strict_requested:
+        if os.environ.get("MEMT_NUMERICS") == "fast":
+            raise ValueError("fast conflicts with --enable-deterministic-inference")
+        if "--enable-deterministic-inference" not in engine:
+            engine.append("--enable-deterministic-inference")
+        if model == "memt-flash":
+            for name, value in (
+                ("DETERMINISTIC_PROFILE", "1"),
+                ("MHC_FIXED_SPLITS", "64"),
+                ("ISOLATE_PREFILL_DECODE", "1"),
+                ("MOE_COMBINE_FP32", "1"),
+            ):
+                os.environ.setdefault("SGLANG_DSV4_" + name, value)
     if model == "memt-flash":
         engine.append("--enable-dp-attention")
     if options.deterministic_communication:

@@ -43,3 +43,29 @@ def test_graph_request_resolves_safe_defaults_without_strict(monkeypatch, tmp_pa
 
     assert os.environ["SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"] == "1"
     assert "SGLANG_DSV4_DETERMINISTIC_PROFILE" not in os.environ
+
+
+@pytest.mark.parametrize("model", ["memt-nano", "memt-flash"])
+def test_strict_is_one_operator_choice(monkeypatch, tmp_path, model):
+    import os
+
+    (tmp_path / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        launch,
+        "validate_model_config",
+        lambda c: (model, SimpleNamespace(chunk_tokens=2048)),
+    )
+    monkeypatch.setenv("MEMT_NUMERICS", "strict")
+    monkeypatch.setenv("MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH", "0")
+    for key in (
+        "DETERMINISTIC_PROFILE",
+        "MHC_FIXED_SPLITS",
+        "ISOLATE_PREFILL_DECODE",
+        "MOE_COMBINE_FP32",
+    ):
+        monkeypatch.delenv("SGLANG_DSV4_" + key, raising=False)
+    options, engine, identity = launch.prepare(["--model-path", str(tmp_path)])
+    assert engine.count("--enable-deterministic-inference") == 1
+    assert (os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE") == "1") == (
+        model == "memt-flash"
+    )

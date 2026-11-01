@@ -28,3 +28,12 @@ CUDA_HOME, nvcc version, PyTorch CUDA runtime and driver in GPU test evidence.
 A compiler/header mismatch can fail only on first use of a new shape; successful
 weight loading alone does not establish readiness. No machine-specific CUDA
 path or GPU count is required by this installation recipe.
+
+## Optional deterministic arithmetic
+
+The default launcher selects fast arithmetic. Set `MEMT_NUMERICS=strict` to
+request the model-specific deterministic profile. The launcher adds the native
+deterministic flag and, for Flash only, resolves its DSV4 profile defaults.
+Explicit conflicting environment settings are preserved and reported as errors.
+Nano does not require DeepSeek-specific switches. Tensor ownership remains
+required in either mode; strict is not needed merely to enable a decode graph.
