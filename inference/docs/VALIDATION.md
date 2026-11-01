@@ -68,3 +68,13 @@ The script no longer forces custom all-reduce off. Use
 not by itself guarantee batch-invariant model outputs. `MEMT_NUMERICS=strict`
 validates the full optional DSV4 arithmetic profile and the native deterministic
 flag; it is separate from the communication-only option.
+
+## Control timeout
+
+Agent validation previously used a 180-second tokenizer/worker control timeout;
+this delivery makes that the default and exposes `--control-timeout-seconds`
+(or `MEMT_CONTROL_TIMEOUT_SECONDS`). The startup identity records the effective
+value. Timeout changes do not alter model math, numeric criteria, or successful
+transaction semantics. An uncertain write still requires receipt reconciliation;
+increasing or configuring the timeout does not authorize replaying it. Repeated
+timeouts require diagnosis rather than repeatedly increasing this value.

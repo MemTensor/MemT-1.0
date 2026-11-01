@@ -76,6 +76,11 @@ def prepare(argv):
     parser.add_argument("--config", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--control-timeout-seconds",
+        type=float,
+        help="Tokenizer/worker control timeout (default 180 seconds)",
+    )
+    parser.add_argument(
         "--deterministic-communication",
         action="store_true",
         help="Use NCCL Tree AllReduce, disable custom/fused collectives; not batch-invariant inference",
@@ -84,6 +89,13 @@ def prepare(argv):
         "--state-directory", help="Server-owned memory snapshot directory"
     )
     options, rest = parser.parse_known_args(argv)
+    from memt_sglang.runtime.config import control_timeout_seconds
+
+    if options.control_timeout_seconds is not None:
+        os.environ["MEMT_CONTROL_TIMEOUT_SECONDS"] = str(
+            options.control_timeout_seconds
+        )
+    timeout = control_timeout_seconds()
     path = Path(options.model_path).expanduser().resolve()
     raw = (path / "config.json").read_bytes()
     config = json.loads(raw)
@@ -147,6 +159,7 @@ def prepare(argv):
         engine.append("--enforce-disable-flashinfer-allreduce-fusion")
     identity = {
         "schema_version": 1,
+        "control_timeout_seconds": timeout,
         "model": model,
         "chunk_tokens": memory_config.chunk_tokens,
         "sglang_version": SGLANG_VERSION,

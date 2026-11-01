@@ -15,7 +15,7 @@ from memt_sglang.protocol import (
     SessionError,
     validate_boolean,
 )
-from memt_sglang.runtime.config import CONTROL_TIMEOUT_SECONDS
+from memt_sglang.runtime.config import control_timeout_seconds
 from memt_sglang.runtime.kv import close_kv, kv_status, open_kv, reset_kv
 from memt_sglang.runtime.snapshots import load_snapshot, save_snapshot
 
@@ -23,9 +23,9 @@ PREFIX = "memt-control-v1:"
 
 
 class ControlChannel:
-    def __init__(self, manager, *, timeout=CONTROL_TIMEOUT_SECONDS):
+    def __init__(self, manager, *, timeout=None):
         self.manager = manager
-        self.timeout = timeout
+        self.timeout = control_timeout_seconds() if timeout is None else timeout
         self.pending = {}
 
     async def call(self, rank, action, **payload):
