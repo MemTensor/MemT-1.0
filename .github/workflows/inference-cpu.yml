@@ -20,4 +20,21 @@ jobs:
       - run: pip install -e .
       - run: ruff check memt_sglang tests tools
       - run: ruff format --check memt_sglang tests tools
+      - uses: actions/checkout@v4
+        with:
+          repository: sgl-project/sglang
+          ref: fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1
+          path: sglang-dependency
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh
+            python/sglang/jit_kernel/dsv4/topk.py
+            python/sglang/kernels/ops/layernorm/mhc.py
+            python/sglang/srt/managers/scheduler.py
+            python/sglang/srt/models/deepseek_v2.py
+            python/sglang/srt/models/deepseek_v4.py
+            python/sglang/srt/server_args.py
+      - run: python tools/apply_sglang_patch.py ../sglang-dependency --apply
       - run: pytest tests -q -ra
+        env:
+          MEMT_TEST_SGLANG_SOURCE: ../sglang-dependency
