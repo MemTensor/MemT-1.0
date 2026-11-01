@@ -155,7 +155,7 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | Set to `1` to reuse immutable eager-writer geometry in a bounded, stream-local cache. Contains no session/state data; defaults to `0`. Commit graph capture is unsupported. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Independently enable native phase overlap with `1`; both default to `0`. Commit boundaries synchronize. |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | Set to `1` and supply `--chunked-prefill-size` to chunk queries; the resolved per-rank budget must be ≥2048. Defaults to `0`. Complete commits remain one forward and may exceed this query budget. |
-| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Idle-boundary wait in ms: `0` disables it (default), otherwise `(0, 10]`. Supports Nano TP2 or Flash TP=DP=EP4/8. |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Idle-boundary wait in ms: `0` disables it (default), otherwise positive. Supports a single attention-TP group or one attention-DP rank per world rank. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release when either target is reached; defaults to 4 requests / 4096 input tokens when waiting is enabled. These are release thresholds, not batch limits. |
 
 For example, enable the four Nano optimizations:

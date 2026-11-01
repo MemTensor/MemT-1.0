@@ -187,7 +187,7 @@ class CoalescingTest(unittest.TestCase):
         )
 
     def test_invalid_configuration_is_not_silently_ignored(self):
-        for value in (-1, 0, float("nan"), float("inf"), 11):
+        for value in (-1, 0, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 m.CoalescingConfig(value)
         with patch.dict(
@@ -326,3 +326,34 @@ class CoalescingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoalescingConfigurationTests(unittest.TestCase):
+    def test_operator_budget_is_not_limited_by_measured_shapes(self):
+        config = m.CoalescingConfig(50, target_requests=96, target_tokens=65536)
+        policy = m.QueryCoalescer(config)
+        decision = policy.decide([(str(i), 512) for i in range(96)], 1)
+        self.assertEqual(decision["reason"], "request_target")
+
+    def test_invalid_resource_budgets_fail_early(self):
+        for kwargs in (
+            {"wait_ms": float("nan")},
+            {"wait_ms": 0},
+            {"wait_ms": 1, "target_requests": 1},
+            {"wait_ms": 1, "target_tokens": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                m.CoalescingConfig(**kwargs)
+
+    def test_single_tp_group_decision_is_not_tied_to_two_ranks(self):
+        original = CoalescingTest()
+        for size in (1, 4, 8):
+            scheduler, _ = original.scheduler()
+            scheduler.ps.attn_tp_size = size
+            with (
+                patch.object(m, "_broadcast_decision", side_effect=lambda _, d: d),
+                patch.object(m.time, "monotonic", return_value=10),
+            ):
+                self.assertEqual(
+                    original.call(scheduler), (None, scheduler.running_batch)
+                )

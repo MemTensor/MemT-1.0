@@ -120,17 +120,21 @@ def validate_server_args(
     validate_overlap(args)
     validate_query_chunks(args)
     if config_from_env() is not None:
-        layout = (args.tp_size, args.dp_size, args.ep_size)
         if not (
-            (model == "memt-nano" and layout == (2, 1, 1))
+            (
+                model == "memt-nano"
+                and args.dp_size == 1
+                and not args.enable_dp_attention
+            )
             or (
                 model == "memt-flash"
-                and layout in ((4, 4, 4), (8, 8, 8))
                 and args.enable_dp_attention
+                and args.tp_size == args.dp_size
             )
         ):
             raise ValueError(
-                "Query coalescing requires Nano TP2/DP1/EP1 or Flash TP=DP=EP4/8"
+                "Query coalescing requires a single attention-TP group or "
+                "one attention-DP rank per world rank"
             )
         if args.enable_prefill_delayer:
             raise ValueError(

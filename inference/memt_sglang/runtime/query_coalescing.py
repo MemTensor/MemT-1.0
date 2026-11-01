@@ -1,4 +1,4 @@
-"""Bounded query coalescing at idle prefill boundaries, Nano TP2 / Flash DP4.
+"""Bounded query coalescing at idle prefill boundaries.
 
 The request/token targets release a batch; they do not cap the native batch.
 Native admission, cancellation, state ownership, and commit execution stay intact.
@@ -22,12 +22,12 @@ class CoalescingConfig:
     target_tokens: int = 4096
 
     def __post_init__(self):
-        if not math.isfinite(self.wait_ms) or not 0 < self.wait_ms <= 10:
-            raise ValueError("Query coalescing wait must be finite and in (0, 10] ms")
-        if type(self.target_requests) is not int or not 2 <= self.target_requests <= 32:
-            raise ValueError("Query coalescing request target must be in [2, 32]")
-        if type(self.target_tokens) is not int or not 1 <= self.target_tokens <= 32768:
-            raise ValueError("Query coalescing token target must be in [1, 32768]")
+        if not math.isfinite(self.wait_ms) or self.wait_ms <= 0:
+            raise ValueError("Query coalescing wait must be finite and positive")
+        if type(self.target_requests) is not int or self.target_requests < 2:
+            raise ValueError("Query coalescing request target must be at least 2")
+        if type(self.target_tokens) is not int or self.target_tokens < 1:
+            raise ValueError("Query coalescing token target must be positive")
 
 
 def config_from_env():
@@ -84,8 +84,8 @@ def _broadcast_decision(scheduler, decision):
     import torch
 
     values = [decision]
-    # This experiment is guarded to TP2/DP1/PP1. Rank 0 owns the wall clock;
-    # using independent rank clocks can diverge before model collectives.
+    # In a single attention-TP group, rank 0 owns the wall clock. The shared
+    # decision prevents rank-local deadlines from diverging before collectives.
     torch.distributed.broadcast_object_list(
         values, src=0, group=scheduler.attn_tp_cpu_group
     )
@@ -148,9 +148,9 @@ def _exchange_dp_observation(scheduler, observation):
 
 
 def _dp_prefill(scheduler, native, config, prefill_delayer_single_pass, running_batch):
-    if scheduler.ps.attn_tp_size != 1 or scheduler.server_args.dp_size not in (4, 8):
+    if scheduler.ps.attn_tp_size != 1 or scheduler.server_args.dp_size < 1:
         raise RuntimeError(
-            "DP query coalescing requires Flash attention TP1 / DP4 or DP8"
+            "DP query coalescing requires one attention-DP rank per world rank"
         )
     policy = getattr(scheduler, "_memt_query_coalescer", None)
     if policy is None:
@@ -253,9 +253,9 @@ def install_query_coalescing(scheduler_class, config):
         if bypass:
             policy.clear()
         else:
-            if self.ps.attn_tp_size != 2 or self.require_mlp_sync:
+            if self.ps.attn_tp_size < 1 or self.require_mlp_sync:
                 raise RuntimeError(
-                    "Experimental query coalescing requires Nano TP2/DP1"
+                    "TP query coalescing requires a single attention-TP group without MLP consensus"
                 )
             leader = self.ps.attn_tp_rank == 0
             decision = policy.decide(requests, time.monotonic()) if leader else None
