@@ -10,12 +10,14 @@
 ## 当前状态
 
 - 已复现旧代码 fast 与 Flash 图校验互相冲突，已解除确定性 profile 的图前置要求。
-- 图请求默认解析 slot reader、padded geometry 和参考 stable C4；显式冲突仍报错。
+- 图请求默认解析 slot reader、padded geometry 和参考 stable C4；fast 可显式选择
+  native C4，选择策略与图的 owner 生命周期检查分开。
 - 默认不限制 GPU compute capability；保留内核能力检查以及用户主动配置的 allowlist。
 - 实际 pinned runner 已按完整 bucket 最大值分配输入，未发现降序假设导致的线上失败；
   adapter 改为明确使用 runner.max_num_token，补任意捕获顺序回归。
-- 旧 README 的类别编号“质量指标”和未证实的 owner 因果解释需要删除。
-- 完整代码 GPU 验收、拆分、依赖复现及时间线实验尚未完成。
+- 已删除旧 README 的类别编号“质量指标”和未证实的 owner 因果解释。
+- 核心拆分、CPU 检查、非空 S 数值矩阵和独立公开依赖 GPU 安装已完成；
+  新版独占性能复测、长摄入/Agent 时间线与进一步优化仍在进行。
 
 ## 工作顺序与验收
 
@@ -65,5 +67,21 @@ Core 分支恢复 atomic writer 的状态池和事务实现，仅保留 memory g
 与生命周期适配。后续长摄入/Agent 性能研究使用明确标注的 continuous-commit 版本，
 与 atomic 对照分开记录，不能把语义差异算成图优化收益。
 
-dd5346a 的 Nano eager/graph 与 Flash graph 正在独立卡组进行非空 S 功能 smoke；
-并行启动结果只用于功能验证，不计入正式性能收益。新拆分后的 core 还需独立 GPU 回归。
+早期 dd5346a 的并行非空 S smoke 已完成，仅用于功能验证。
+
+## 生产整理检查点 156373d
+
+- Core：286 tests + 12 subtests；continuous-commit：304 tests + 12 subtests，
+  lint/format 均通过。后者已同步 core 配置和控制超时修复，独立分支保留。
+- c55344c 快档完整词表 graph/eager 比较：Nano C1/C32、Flash C1/C32/C96，
+  共 20,736 个独立位置全部逐位相同。真实非空 S、不同提示、固定 token 历史；
+  数值工具不用于计时。后续未改 memory tensor 运算，仍按来源明确标记结果。
+- 从公开 SGLang 完整压缩包加交付补丁独立安装，156373d 的 Nano fast/strict、
+  Flash fast 实权重非空 S 请求均通过。目录名 native-topk 的一次 Flash 实验被
+  旧 runner 覆盖成 stable C4，已明确限制其结论，不冒称 native C4 已验收。
+- 自定义 native 开关不再被图强制覆盖；去掉 coalescing 的形状/预算白名单，
+  保留实际 collective 拓扑约束。布尔值与上游解析一致；部分确定性配置报告 custom。
+- 默认 Agent 控制截止时间恢复已验证的 180 秒，并提供部署配置及启动身份记录。
+  不通过延长时间掩盖死锁，不自动重放提交结果不确定的事务。
+- Nano 首份真实非空 S/C32 图节点时间线已采集；Flash 同类采集进行中。
+  profiler 数据与正式性能隔离，后续报告区分 GPU 算子累计时长、重叠和暴露等待。

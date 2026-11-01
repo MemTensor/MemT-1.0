@@ -1,8 +1,60 @@
 # Validation and evidence scope
 
-This production-cleanup branch is under validation. Final-commit GPU capture,
-numerical and performance checks remain pending. The historical results below
-belong to independently frozen versions, not automatically to this branch.
+This branch has CPU, dependency-installation and GPU functional evidence. Formal
+performance remeasurement and the later workload timelines remain in progress.
+Evidence below identifies its source revision; results from different revisions
+and comparisons must not be combined into a single speedup.
+
+## Production-cleanup validation (2026-11-02)
+
+At `156373d`, core CPU checks pass: 286 tests and 12 subtests, with no skips.
+Ruff lint and format pass. GitHub CI also checks the bundled patch against seven
+files fetched from the pinned public SGLang reference, including executable AST
+checks of the actual owner-retention expression. The continuous-commit branch is
+separate and passes 304 tests plus 12 subtests after integrating these core fixes.
+
+The numerical matrix uses frozen adapter `c55344c`, fast arithmetic, nonzero
+published S and diverse prompts. Graph and eager arms share the same initial
+batch composition and row order. Each session contributes 128 contiguous forced
+history positions and its complete FP32 vocabulary:
+
+| Model | Concurrency | Unique positions | Bit-identical positions |
+| --- | ---: | ---: | ---: |
+| Nano | 1 | 128 | 128 |
+| Nano | 32 | 4,096 | 4,096 |
+| Flash | 1 | 128 | 128 |
+| Flash | 32 | 4,096 | 4,096 |
+| Flash | 96 | 12,288 | 12,288 |
+
+All 20,736 positions have finite logits, top-1 agreement 100%, relative L2 error
+zero and Pearson correlation one. Duplicate Nano TP-rank evidence is checked but
+not counted twice. These instrumented runs establish graph/eager equality under
+controlled histories; they are neither timing nor business-quality measurements.
+Later changes through `156373d` concern configuration, timeout, coalescing and
+capability validation; the memory tensor implementations are unchanged. They do
+not extend this numerical result to alternative selection policies.
+
+Six functional smoke attempts at `a935789` passed: Nano/Flash optional strict
+profiles, Nano TP1 control and coalescing, Nano TP4 coalescing, and Flash alternative
+native MHC settings. They are small functional checks run on separate GPU groups,
+not performance evidence or qualification of every topology.
+
+Independent installation at `156373d` extracted the complete public SGLang
+`fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` archive into a fresh directory and
+applied only the bundled seven-file patch. All seven patched hashes match the
+tested dependency. Real-weight, nonzero-memory smoke passed for Nano fast,
+Nano strict and Flash fast. No private overlay source was copied into this tree.
+The Flash attempt's historical directory name ends in `native-topk`, but the
+runner actually selected stable C4: that attempt is evidence for the default
+policy only. A first launcher attempt omitted an experiment-directory variable
+and exited before model startup; it remains preserved separately.
+
+Raw evidence root on the experiment node:
+`memt-dynamic-prefill-20261027/codex-production-20261102`, including
+`final-{nano,flash}-c{1,32,96}-numerics.json`, `whole-overlay-audit.json`,
+`public-reproduction.json` and per-attempt logs/results in the sibling
+`claude-queue-20261029/out` directory. The external tools and immutable source
+copies are kept outside the production Python package.
 
 ## Historical fast-mode evidence (2026-11-02)
 
