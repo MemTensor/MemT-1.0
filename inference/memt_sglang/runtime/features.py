@@ -76,7 +76,7 @@ def strict_numerics_pending(*, environment=None):
     ]
 
 
-def validate_numerics_tier(args, *, environment=None):
+def validate_numerics_tier(args, *, environment=None, model=None):
     """Reject a strict-only request made under `fast` instead of dropping it silently."""
     environment = os.environ if environment is None else environment
     requested = strict_numerics_pending(environment=environment)
@@ -87,20 +87,14 @@ def validate_numerics_tier(args, *, environment=None):
         # Nothing was asserted, so nothing can contradict: report and move on.
         return tier
     if tier == "strict":
+        switches = () if model == "memt-nano" else STRICT_NUMERICS_SWITCHES
         missing = [
-            name
-            for name in (
-                "SGLANG_DSV4_DETERMINISTIC_PROFILE",
-                "SGLANG_DSV4_MHC_FIXED_SPLITS",
-                "SGLANG_DSV4_ISOLATE_PREFILL_DECODE",
-                "SGLANG_DSV4_MOE_COMBINE_FP32",
-            )
-            if environment.get(name) in (None, "0", "")
+            name for name in switches if environment.get(name) in (None, "0", "")
         ]
         if missing or not flag:
             raise ValueError(
-                "MEMT_NUMERICS=strict requires --enable-deterministic-inference and %s"
-                % ", ".join(missing or ["every DSV4 profile switch"])
+                "MEMT_NUMERICS=strict requires --enable-deterministic-inference"
+                + (" and " + ", ".join(missing) if missing else "")
             )
         return tier
     if flag or requested:

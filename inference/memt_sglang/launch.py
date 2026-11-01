@@ -272,7 +272,7 @@ def main(argv=None):
 
     # Enforced here, before any worker starts: the tier decides whether the
     # deterministic switches are allowed to be set at all.
-    identity["numerics_tier"] = validate_numerics_tier(args)
+    identity["numerics_tier"] = validate_numerics_tier(args, model=identity["model"])
     identity["execution"] = execution_identity(args)
     identity["mode"] = (
         "breakable"

@@ -11,6 +11,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from memt_sglang.runtime import features
 
 PROFILE = {
@@ -97,3 +99,12 @@ class NumericsTierTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_nano_strict_does_not_require_deepseek_profile(monkeypatch):
+    for name in features.STRICT_NUMERICS_SWITCHES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MEMT_NUMERICS", "strict")
+    assert features.validate_numerics_tier(ON, model="memt-nano") == "strict"
+    with pytest.raises(ValueError, match="deterministic-inference"):
+        features.validate_numerics_tier(OFF, model="memt-nano")
