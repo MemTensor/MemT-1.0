@@ -23,44 +23,25 @@ from memt_sglang.validation import (
 )
 
 
-def _flash_prefill_config(rest, graph):
-    """Normalize an explicit Flash request before native resolution can change it."""
-    from memt_sglang.runtime.flash_prefill import (
-        FlashPrefillIntent,
-        explicit_capture_config,
-    )
-
+def _flash_graph_config(rest, graph):
+    """Preserve native decode options; experimental Flash prefill is separate."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("--cuda-graph-config")
     if sum(v.split("=", 1)[0] == "--cuda-graph-config" for v in rest) > 1:
-        raise ValueError("Duplicate Flash cuda-graph-config")
+        raise ValueError("Duplicate cuda-graph-config")
     parsed, remaining = parser.parse_known_args(rest)
     override = json.loads(parsed.cuda_graph_config) if parsed.cuda_graph_config else {}
     if not isinstance(override, dict):
-        raise ValueError("Flash cuda-graph-config must be an object")
+        raise ValueError("cuda-graph-config must be an object")
     graph = {**graph, **override}
-    phase = graph["prefill"]
-    if not isinstance(phase, dict):
-        raise ValueError("Flash prefill config must be an object")
-    backend = phase.get("backend", "disabled")
-    tokens = phase.get("bs", [512, 1024]) if backend == "breakable" else []
-    if not isinstance(tokens, list):
-        raise ValueError("Flash prefill bs must be a list")
-    intent = FlashPrefillIntent(backend, tuple(tokens), 4)
-    if backend == "breakable":
-        bounded = explicit_capture_config(intent)
-        if "max_bs" in phase and phase["max_bs"] != bounded["max_bs"]:
-            raise ValueError("Flash prefill max_bs must match requested bs")
-        graph = {**graph, "prefill": {**phase, **bounded}}
-    return remaining, graph, intent
-
-
-def _unobserved_flash_actual():
-    return {
-        "status": "not_observed",
-        "backend": None,
-        "evidence": "worker capture events; replay_counters(runner); optional replay_observer",
-    }
+    if not isinstance(graph["prefill"], dict):
+        raise ValueError("prefill config must be an object")
+    if graph["prefill"].get("backend", "disabled") != "disabled":
+        raise ValueError(
+            "Flash prefill capture requires the separate experimental adapter; "
+            "use eager prefill with breakable decode in this package"
+        )
+    return remaining, graph
 
 
 def prepare(argv):
@@ -124,9 +105,8 @@ def prepare(argv):
         }
         for phase in ("prefill", "decode")
     }
-    options.flash_prefill_intent = None
     if model == "memt-flash":
-        rest, graph, options.flash_prefill_intent = _flash_prefill_config(rest, graph)
+        rest, graph = _flash_graph_config(rest, graph)
     engine = [
         "--model-path",
         str(path),
@@ -167,17 +147,6 @@ def prepare(argv):
         or any(overlap_phases())
         else "eager",
     }
-    if options.flash_prefill_intent is not None:
-        intent = options.flash_prefill_intent
-        identity["flash_prefill"] = {
-            "requested_backend": intent.requested_backend,
-            "requested_capture_tokens": list(intent.capture_tokens),
-            "resolved_backend": None,
-            "resolved_capture_tokens": None,
-            "status": "not_resolved",
-            "gpu_qualified": False,
-            "actual": _unobserved_flash_actual(),
-        }
     if options.deterministic_communication:
         identity["communication"] = {
             "NCCL_ALGO": "allreduce:tree",
@@ -209,65 +178,8 @@ def redacted_argv(argv):
     return result
 
 
-def resolve_flash_prefill(options, args, identity):
-    """Validate before publishing the explicit request to spawned workers."""
-    from memt_sglang.runtime.flash_prefill import (
-        prefill_identity,
-        validate_capture_request,
-    )
-
-    os.environ.pop("MEMT_FLASH_PREFILL_REQUEST", None)
-    intent = options.flash_prefill_intent
-    if intent is None:
-        return identity
-    phase = args.cuda_graph_config.prefill
-    receipt = prefill_identity(intent, phase)
-    if phase.backend != "disabled":
-        if intent.requested_backend != "breakable":
-            raise ValueError(
-                "Flash prefill resolved enabled without an explicit request"
-            )
-        receipt = validate_capture_request(args, intent)
-        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps(
-            {
-                "requested_backend": intent.requested_backend,
-                "capture_tokens": list(intent.capture_tokens),
-                "dp_size": intent.dp_size,
-            }
-        )
-    return {
-        **identity,
-        "flash_prefill": {
-            **receipt,
-            "resolved_dp_size": args.dp_size,
-            "actual": _unobserved_flash_actual(),
-        },
-    }
-
-
-def emit_flash_prefill_event(event):
-    """Worker stdout evidence, separate from the parent's unresolved actual state."""
-    print(
-        json.dumps(
-            {
-                **event,
-                "component": "memt_flash_prefill",
-                "pid": os.getpid(),
-                "gpu_qualified": False,
-            }
-        ),
-        flush=True,
-    )
-
-
-def bootstrap(*, worker=True, replay_observer=None):
-    """Shared scheduler entry, including revision_launch's existing bootstrap().
-
-    Parent, tokenizer and detokenizer explicitly pass worker=False. Scheduler
-    wrappers must call this before constructing their native ModelRunner.
-    An explicit replay_observer(event) may synchronize for diagnosis; default
-    production replay has no extra device synchronization or per-batch logging.
-    """
+def bootstrap(*, worker=True):
+    """Register model and loader adapters before native worker construction."""
     require_sglang()
     model = os.environ["MEMT_SGLANG_MODEL"]
     if model == "memt-nano":
@@ -283,22 +195,6 @@ def bootstrap(*, worker=True, replay_observer=None):
     from memt_sglang.models.common.loader import install_model_loader
 
     install_model_loader()
-    request = os.environ.get("MEMT_FLASH_PREFILL_REQUEST")
-    if worker and model == "memt-flash" and request:
-        from memt_sglang.runtime.flash_prefill import (
-            FlashPrefillIntent,
-            install_native_worker,
-        )
-
-        payload = json.loads(request)
-        intent = FlashPrefillIntent(
-            payload["requested_backend"],
-            tuple(payload["capture_tokens"]),
-            payload["dp_size"],
-        )
-        install_native_worker(
-            intent, emit=emit_flash_prefill_event, replay_observer=replay_observer
-        )
 
 
 def run_scheduler(*args, **kwargs):
@@ -372,7 +268,6 @@ def main(argv=None):
         config_file=options.config,
         deterministic_communication=options.deterministic_communication,
     )
-    identity = resolve_flash_prefill(options, args, identity)
     from memt_sglang.runtime.features import validate_numerics_tier
 
     # Enforced here, before any worker starts: the tier decides whether the

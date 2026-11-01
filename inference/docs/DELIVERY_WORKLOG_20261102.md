@@ -49,3 +49,13 @@ NCCL kernel 时长不直接等于可消除等待。公布分类规则、未归�
 调度重叠。只有整体 TPOT、TTFT 或吞吐改善且数值回归通过，才计入优化收益。
 剩余架构成本按实测字节量、kernel 数、依赖链和资源利用率分析；不从单点平均
 带宽利用率推导“吞吐已经到头”。
+
+## 已建立的代码检查点
+
+`1c19620` 保存配置/生命周期修复、依赖补丁、文档及规范整理的完整版本。
+`archive/pr7-complete-experiments-20261102` 保留 Flash prefill 实验实现和其测试。
+正式分支随后移除该实验的 AST 改写、固定 DP4/输入长度门禁和诊断注入入口；
+保留 eager Flash prefill 与 breakable decode 的组合。移出的测试随实验保留，
+不是删除失败测试以取得通过。Core CPU 当前 282 passed，8 subtests passed。
+七个 SGLang 依赖文件从公开基础提交应用补丁后，逐文件哈希与之前独立验收的
+固定 overlay 全部一致。正式 adapter 的 GPU 回归仍待执行。
