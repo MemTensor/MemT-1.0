@@ -70,3 +70,10 @@ def test_native_kernel_choice_is_not_a_benchmark_allowlist(monkeypatch):
     monkeypatch.setenv("SGLANG_OPT_USE_TILELANG_MHC_PRE", "0")
     monkeypatch.setenv("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "0")
     validate_flash_decode_graph(SimpleNamespace(speculative_skip_dp_mlp_sync=False))
+
+
+def test_native_true_spelling_is_not_rejected(monkeypatch):
+    for name in ("MEMORY_DECODE_GRAPH", "C4_STABLE_TOPK", "PADDED_DECODE_QUERY"):
+        monkeypatch.setenv("MEMT_EXPERIMENT_" + name, "1")
+    monkeypatch.setenv("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "TRUE")
+    validate_flash_decode_graph(SimpleNamespace(speculative_skip_dp_mlp_sync=False))

@@ -122,3 +122,10 @@ def test_irrelevant_flash_flags_do_not_gate_nano_fast(monkeypatch):
     monkeypatch.setenv("MEMT_NUMERICS", "fast")
     monkeypatch.setenv("SGLANG_DSV4_DETERMINISTIC_PROFILE", "1")
     assert features.validate_numerics_tier(OFF, model="memt-nano") == "fast"
+
+
+def test_native_false_spelling_does_not_request_strict(monkeypatch):
+    for name in features.STRICT_NUMERICS_SWITCHES:
+        monkeypatch.setenv(name, "0" if name.endswith("FIXED_SPLITS") else "false")
+    monkeypatch.setenv("MEMT_NUMERICS", "fast")
+    assert features.validate_numerics_tier(OFF, model="memt-flash") == "fast"

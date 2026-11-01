@@ -68,19 +68,27 @@ def numerics_tier(*, environment=None, args=None, model=None):
     return "custom" if requested or flag else "fast"
 
 
-def strict_numerics_pending(*, environment=None):
-    """Switches the operator asked for that `fast` would otherwise silently ignore.
-
-    Only the DSV4 profile belongs here. PADDED_DECODE_QUERY is a replay-consistency
-    requirement (the captured decode geometry), not a numeric-tolerance choice, so
-    it is valid -- and required -- in either tier.
-    """
+def native_flag(name, *, environment=None):
+    """Use pinned SGLang's case-insensitive native boolean spelling."""
     environment = os.environ if environment is None else environment
-    return [
-        name
-        for name in STRICT_NUMERICS_SWITCHES
-        if environment.get(name) not in (None, "0", "")
-    ]
+    return str(environment.get(name, "0")).lower() in ("1", "true")
+
+
+def strict_numerics_pending(*, environment=None):
+    """Active DSV4 arithmetic switches, independent of replay buffer safety."""
+    environment = os.environ if environment is None else environment
+    result = []
+    for name in STRICT_NUMERICS_SWITCHES:
+        if name == "SGLANG_DSV4_MHC_FIXED_SPLITS":
+            try:
+                active = int(environment.get(name, "0")) > 0
+            except ValueError:
+                active = False
+        else:
+            active = native_flag(name, environment=environment)
+        if active:
+            result.append(name)
+    return result
 
 
 def validate_numerics_tier(args, *, environment=None, model=None):
@@ -97,9 +105,7 @@ def validate_numerics_tier(args, *, environment=None, model=None):
         return tier
     if tier == "strict":
         switches = () if model == "memt-nano" else STRICT_NUMERICS_SWITCHES
-        missing = [
-            name for name in switches if environment.get(name) in (None, "0", "")
-        ]
+        missing = [name for name in switches if name not in requested]
         if missing or not flag:
             raise ValueError(
                 "MEMT_NUMERICS=strict requires --enable-deterministic-inference"
@@ -134,11 +140,15 @@ def validate_flash_decode_graph(args):
     missing = [
         name
         for name, want in required
-        if os.environ.get(name, "1" if name.startswith("SGLANG_OPT_") else None) != want
+        if not (
+            native_flag(name)
+            if name.startswith("SGLANG_")
+            else os.environ.get(name) == want
+        )
     ]
     if missing or getattr(args, "speculative_skip_dp_mlp_sync", False):
         raise ValueError(
-            "Flash memory decode graph requires these switches to be set exactly; "
+            "Flash memory decode graph requires enabled replay safety features; "
             "missing or wrong: %s%s"
             % (
                 ", ".join(missing) or "(none)",
@@ -262,18 +272,13 @@ def execution_identity(args):
         padded_decode_query=enabled("PADDED_DECODE_QUERY"),
         require_native_kv_capacity=enabled("REQUIRE_NATIVE_KV_CAPACITY"),
         c4_stable_topk=enabled("C4_STABLE_TOPK"),
-        dsv4_deterministic_profile=os.environ.get(
-            "SGLANG_DSV4_DETERMINISTIC_PROFILE", "0"
-        )
-        == "1",
+        dsv4_deterministic_profile=native_flag("SGLANG_DSV4_DETERMINISTIC_PROFILE"),
         dsv4_mhc_fixed_splits=os.environ.get("SGLANG_DSV4_MHC_FIXED_SPLITS"),
-        dsv4_phase_isolation=os.environ.get("SGLANG_DSV4_ISOLATE_PREFILL_DECODE")
-        == "1",
-        dsv4_moe_combine_fp32=os.environ.get("SGLANG_DSV4_MOE_COMBINE_FP32") == "1",
-        dsv4_pin_decode_intermediates=os.environ.get(
+        dsv4_phase_isolation=native_flag("SGLANG_DSV4_ISOLATE_PREFILL_DECODE"),
+        dsv4_moe_combine_fp32=native_flag("SGLANG_DSV4_MOE_COMBINE_FP32"),
+        dsv4_pin_decode_intermediates=native_flag(
             "SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"
-        )
-        == "1",
+        ),
         commit_chunk_policy=commit_chunk_policy(),
         commit_semantics_version="atomic-fresh-kv-v1",
         prefill_overlap=prefill,
