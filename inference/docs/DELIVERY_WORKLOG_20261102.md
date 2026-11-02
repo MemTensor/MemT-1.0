@@ -118,3 +118,12 @@ Flash mHC prewarm is disabled only when the resolved chunk budget is the native
 unchunked sentinel. Positive budgets retain the native/operator warmup setting.
 The effective setting is recorded in startup identity. This corrects the former
 unconditional override; it does not change the default unchunked execution.
+
+Fixed mHC partitions are now positive integer configuration, rather than a
+64/16384 model-shape allowlist. The bundled native DeepGEMM kernel distributes
+K blocks (including remainders) among the configured splits. This change leaves
+the released default of 64 unchanged and delegates backend geometry legality
+to the native implementation. CPU tests execute the actual patched function
+for multiple widths/partitions; native-kernel and model-level GPU checks are
+still required for changed partitions. No alternative partition is promoted
+as qualified by these CPU checks.

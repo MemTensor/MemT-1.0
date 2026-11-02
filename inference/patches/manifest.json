@@ -5,10 +5,10 @@
     "jit_kernel/dsv4/topk.py": "1b8f8495c444c33929d7a9abbf43bc39ccade2d36e8427dec23447e2b98a0159",
     "srt/models/deepseek_v2.py": "28100dbfeaecfac4cb8ec75a48d6ddad617fdf4578e0249821a363438b19a34a",
     "srt/server_args.py": "e08129c6b5621895ecc901a787fe5f527079f56a627176ae524d333fd1dec008",
-    "kernels/ops/layernorm/mhc.py": "66d6d06bbb4a891d70803f36f2448a6c52435328f402782def9c0ac1953ea576",
+    "kernels/ops/layernorm/mhc.py": "40fc431b45c0b0a4282c1aa0f8c616170fccc62727aa2b1c0056397643efd9f9",
     "srt/managers/scheduler.py": "6b6b72c5f353ed7430e655a0c6091e5002bfcc9a2e165bce21667f0728da820d",
     "srt/models/deepseek_v4.py": "2b413c020a24ee2d5b46e17773811faca0de27ec7b7d897b57d8a955eef30af0"
   },
-  "patch_sha256": "ae10bc6dab3bf4c93e182e64bc2b9fb102eaff56a5152c2b0975009c12ddec82",
+  "patch_sha256": "f3ec2bc8443850448148248da4fae7916031de838645e565c6c1fbe288861810",
   "scope": "Patch against public pinned SGLang. Boolean-policy consistency regression tested on actual patched expressions; updated dependency GPU acceptance pending."
 }

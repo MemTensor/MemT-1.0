@@ -55,3 +55,32 @@ def test_native_profile_booleans_match_adapter(monkeypatch, value, expected):
             assert actual == expected, (relative, source, value)
             checked.add(relative)
     assert checked == set(FILES)
+
+
+@pytest.mark.parametrize("width,splits", [(8192, "32"), (16384, "64"), (28672, "7")])
+def test_native_fixed_partition_has_no_model_shape_allowlist(
+    monkeypatch, width, splits
+):
+    checkout = os.environ.get("MEMT_TEST_SGLANG_SOURCE")
+    if not checkout:
+        pytest.skip("Set MEMT_TEST_SGLANG_SOURCE to a patched source checkout")
+    path = Path(checkout) / "python/sglang/kernels/ops/layernorm/mhc.py"
+    tree = ast.parse(path.read_text())
+    function = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_compute_num_split_for_mhc_pre"
+    )
+    # The configured partition must not query batch/device heuristics. CUDA
+    # kernel legality and numerical behavior are validated separately on GPU.
+    namespace = {"os": os}
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"),
+        namespace,
+    )
+    monkeypatch.setenv("SGLANG_DSV4_DETERMINISTIC_PROFILE", "true")
+    monkeypatch.setenv("SGLANG_DSV4_MHC_FIXED_SPLITS", splits)
+    assert namespace[function.name](33, width) == int(splits)
+    monkeypatch.setenv("SGLANG_DSV4_MHC_FIXED_SPLITS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        namespace[function.name](33, width)

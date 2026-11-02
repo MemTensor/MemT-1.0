@@ -229,7 +229,7 @@ index fdaedfd..1f38c16 100644
  # rows 1..N = {batch_id, seq_len} of items routed to the persistent cluster pool.
  _PLAN_METADATA_INTS_PER_BATCH = 2
 diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
-index 190d408..54e592f 100644
+index 190d408..88fb618 100644
 --- a/python/sglang/kernels/ops/layernorm/mhc.py
 +++ b/python/sglang/kernels/ops/layernorm/mhc.py
 @@ -2,6 +2,7 @@ import functools
@@ -240,7 +240,7 @@ index 190d408..54e592f 100644
  import threading
  from typing import Tuple
  
-@@ -539,7 +540,18 @@ def mhc_pre_gemm_sqrsum_splitk_kernel(
+@@ -539,7 +540,22 @@ def mhc_pre_gemm_sqrsum_splitk_kernel(
      )
  
  
@@ -253,9 +253,13 @@ index 190d408..54e592f 100644
 +    ):
 +        fixed = os.environ.get("SGLANG_DSV4_MHC_FIXED_SPLITS")
 +        if fixed is not None:
-+            if fixed != "64" or hc_hidden_size != 16384:
-+                raise ValueError("Experimental fixed mHC profile validates splits=64 and hc_hidden_size=16384 only")
-+            return 64
++            # Fix the reduction partition independently of batch size. Native
++            # kernels validate their own geometry; a measured model shape is
++            # not a restriction on other configurations.
++            splits = int(fixed)
++            if splits <= 0:
++                raise ValueError("SGLANG_DSV4_MHC_FIXED_SPLITS must be positive")
++            return splits
      block_m, block_k = 64, 64
      grid_size = (num_tokens + block_m - 1) // block_m
      num_block_k = (hc_hidden_size + block_k - 1) // block_k
