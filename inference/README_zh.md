@@ -149,7 +149,7 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | 设为 `1` 将只读 memory 纳入 breakable decode graph；依赖 slot read，拒绝 overlap/PDMux，默认 `0`。 |
 | `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | 设为 `1` 复用 eager writer 的不可变几何元数据；缓存有界、按 stream 隔离，不含会话或状态内容，默认 `0`；不支持 commit graph capture。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 分别设为 `1` 启用对应阶段的 native overlap，默认均为 `0`；commit 边界同步。 |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | 设为 `1` 允许 query chunk，并显式传入 `--chunked-prefill-size`；解析后每 rank 预算须 ≥2048，默认 `0`。完整 commit 仍一次 forward 执行，可超过 query 预算。 |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | 设为 `1` 允许 query chunk，并显式传入 `--chunked-prefill-size`；解析后每 rank 预算须为正数并覆盖一个 native KV page，默认 `0`。完整 commit 仍一次 forward 执行，可超过 query 预算。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲边界主动等待上限，单位 ms，默认 `0`（关闭），启用时须在 正数；只支持 单个 attention-TP 组或每个 world rank 对应一个 attention-DP rank。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 达到任一阈值立即放行；启用等待时默认为 4 请求／4096 输入 tokens，非 batch 上限。 |
 

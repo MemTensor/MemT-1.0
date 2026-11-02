@@ -254,12 +254,18 @@ def validate_graphs(args):
 
 
 def validate_query_chunks(args):
+    """Query budgets follow native page geometry, not memory write-event size."""
     chunk = getattr(args, "chunked_prefill_size", None)
-    if type(chunk) is not int or (
-        chunk != -1 and not (enabled("QUERY_CHUNKS") and chunk >= 2048)
-    ):
+    if type(chunk) is int and chunk == -1:
+        return
+    if type(chunk) is not int or chunk <= 0 or not enabled("QUERY_CHUNKS"):
+        raise ValueError("Query chunking requires QUERY_CHUNKS=1 and a positive budget")
+    page = getattr(args, "page_size", None)
+    # Native admission rounds an intermediate query chunk down to whole pages.
+    # A budget smaller than one page cannot advance a long query.
+    if page is not None and chunk < page:
         raise ValueError(
-            "Query chunking requires its experiment flag and budget >=2048; otherwise use -1"
+            f"Query chunk budget {chunk} must cover native page size {page}"
         )
 
 

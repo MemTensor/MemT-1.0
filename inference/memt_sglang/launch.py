@@ -256,6 +256,14 @@ def init_tokenizer(*args, **kwargs):
     return result
 
 
+def resolve_mhc_prewarm(args, model):
+    """Pinned native warmup allocates the resolved chunk budget as a shape."""
+    if model == "memt-flash" and args.chunked_prefill_size == -1:
+        # An unchunked sentinel is not a tensor dimension. Positive budgets
+        # retain native warmup and the operator's explicit setting.
+        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
+
+
 def main(argv=None):
     options, engine, identity = prepare(sys.argv[1:] if argv is None else argv)
     if options.dry_run:
@@ -270,11 +278,6 @@ def main(argv=None):
         os.environ["NCCL_ALGO"] = "allreduce:tree"
     # Memory injection uses the native BF16 output projection.
     os.environ["SGLANG_OPT_FP8_WO_A_GEMM"] = "0"
-    if identity["model"] == "memt-flash":
-        # Pinned 0.5.16 MHC prewarm uses chunked_prefill_size as an allocation
-        # size and cannot handle our required -1 (unchunked prefill). Let the
-        # unchanged native kernel compile on its actual first forward instead.
-        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
     os.environ["SGLANG_EXTERNAL_MODEL_PACKAGE"] = "memt_sglang.models"
     os.environ["MEMT_SGLANG_MODEL"] = identity["model"]
     os.environ["MEMT_MODEL_IDENTITY"] = identity["config_sha256"]
@@ -289,6 +292,7 @@ def main(argv=None):
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
+    resolve_mhc_prewarm(args, identity["model"])
     sync_graph_config(args)
     validate_server_args(
         args,
@@ -305,6 +309,10 @@ def main(argv=None):
     # deterministic switches are allowed to be set at all.
     identity["numerics_tier"] = validate_numerics_tier(args, model=identity["model"])
     identity["execution"] = execution_identity(args)
+    if identity["model"] == "memt-flash":
+        identity["execution"]["mhc_prewarm"] = os.environ.get(
+            "SGLANG_DSV4_MHC_PREWARM", "native-default"
+        )
     identity["mode"] = (
         "breakable"
         if any(

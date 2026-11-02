@@ -106,3 +106,15 @@ Remaining plan-A work includes fixed mHC split geometry, query chunk budgets,
 prewarm/default launch policy, and documenting supported integration boundaries.
 This checkpoint is not a declaration that the complete cleanup has passed GPU
 acceptance or that subsequent performance candidates are ready for integration.
+
+Query chunk validation now follows native page geometry rather than a fixed
+2048-token memory write event. It requires a positive budget that can admit at
+least one native KV page; complete atomic commits still use the existing whole
+request guard. Pinned native admission rounds intermediate query boundaries to
+pages, which is the actual progress constraint. GPU validation of smaller query
+budgets is pending.
+
+Flash mHC prewarm is disabled only when the resolved chunk budget is the native
+unchunked sentinel. Positive budgets retain the native/operator warmup setting.
+The effective setting is recorded in startup identity. This corrects the former
+unconditional override; it does not change the default unchunked execution.
