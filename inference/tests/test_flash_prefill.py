@@ -22,6 +22,7 @@ from memt_sglang.runtime.flash_prefill import (
 def mode(name="extend"):
     return NS(
         is_extend=lambda: name == "extend",
+        is_decode=lambda: name == "decode",
         is_idle=lambda: name == "idle",
         is_target_verify=lambda: name == "verify",
     )
@@ -165,6 +166,15 @@ def test_original_idle_or_uneven_counts_cannot_be_hidden_by_max_len(counts):
     votes = [vote(rank, counts) for rank in range(len(counts))]
     assert all(not item.eligible for item in votes)
     assert not agree_replay(votes, dp_size=len(counts)).allowed
+
+
+def test_decoding_rank_in_a_prefill_round_is_labelled_phase_mixed():
+    """A rank decoding while another prefills vetoes replay as R3 'DP phase mixed'."""
+    runner, batch = runner_and_batch()
+    batch.forward_mode = mode("decode")
+    result = replay_vote(runner, batch, rank=0, native_can_run=native_eligibility())
+    assert result.reasons == ("dp_phase_mixed",)
+    assert not result.eligible
 
 
 def test_native_inactive_guard_alone_misses_max_len_converted_idle():

@@ -3,6 +3,48 @@
 from dataclasses import fields, replace
 from functools import wraps
 
+from . import graph_stats
+
+
+def _graph_key_value(runner, batch):
+    """The batch size native feeds its graph key; must match native exactly.
+
+    Under DP attention Flash syncs per-rank request counts and keys the graph on
+    the cross-rank maximum, not the local batch. Re-deriving it differently
+    would label buckets that no captured shape corresponds to.
+    """
+    if getattr(runner, "require_mlp_tp_gather", False):
+        counts = getattr(batch, "original_global_num_tokens_cpu", None)
+        if counts:
+            return max(counts)
+    return batch.batch_size
+
+
+def _decode_reasons(runner, batch):
+    """Label a native decode fallback; never decides the outcome."""
+    value = _graph_key_value(runner, batch)
+    if getattr(runner, "disable_padding", False):
+        return ("native_veto_other",)
+    if value > getattr(runner, "max_bs", value):
+        return ("over_max_gear",)
+    return ("native_veto_other",)
+
+
+def _record(runner, batch, admitted, reasons):
+    value = _graph_key_value(runner, batch)
+    gear = None
+    if admitted:
+        # Native replays the smallest captured batch size >= the key
+        # (decode load_batch _pad_to_bucket); record that, not the raw key.
+        gear = next((bs for bs in sorted(runner.capture_bs) if bs >= value), None)
+    graph_stats.record(
+        phase="decode",
+        key=value,
+        gear=gear,
+        admitted=admitted,
+        reasons=reasons,
+    )
+
 
 def install_logits_output_bridge():
     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -82,9 +124,15 @@ def install_decode_query_guard():
     @wraps(original_can_run)
     def can_run(self, batch):
         runtime = getattr(self.model_runner.model, "memt_runtime", None)
-        if runtime is not None and not query_graph_allowed(runtime, batch, "decode"):
+        if runtime is None:
+            return original_can_run(self, batch)
+        if not query_graph_allowed(runtime, batch, "decode"):
+            _record(self, batch, False, ("memt_query_veto",))
             return False
-        return original_can_run(self, batch)
+        allowed = original_can_run(self, batch)
+        _record(self, batch, allowed,
+                () if allowed else _decode_reasons(self, batch))
+        return allowed
 
     @wraps(original_execute)
     def execute(self, batch, *args, **kwargs):

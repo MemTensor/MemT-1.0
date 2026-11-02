@@ -275,6 +275,21 @@ def emit_flash_prefill_event(event):
                       "gpu_qualified": False}), flush=True)
 
 
+def emit_graph_stats(event):
+    """One line per phase per rank, printed when the worker process exits."""
+    print(json.dumps({**event, "pid": os.getpid()}), flush=True)
+
+
+def _worker_dp_rank():
+    """Rank for the counter summary, resolved at exit; None leaves pid-only rows."""
+    try:
+        from sglang.srt.distributed.parallel_state import get_world_group
+
+        return get_world_group().rank_in_group
+    except Exception:
+        return None
+
+
 def bootstrap(*, worker=True, replay_observer=None):
     """Shared scheduler entry, including revision_launch's existing bootstrap().
 
@@ -298,6 +313,12 @@ def bootstrap(*, worker=True, replay_observer=None):
     from memt_sglang.models.common.loader import install_model_loader
 
     install_model_loader()
+    if worker:
+        from memt_sglang.runtime import graph_stats
+
+        graph_stats.install_exit_summary(
+            model=model, rank=_worker_dp_rank, emit=emit_graph_stats,
+        )
     request = os.environ.get("MEMT_FLASH_PREFILL_REQUEST")
     if worker and model == "memt-flash" and request:
         from memt_sglang.runtime.flash_prefill import (

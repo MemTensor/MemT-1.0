@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
+from . import graph_stats
 from .decode_graph import query_graph_allowed
 
 
@@ -143,7 +144,15 @@ def _protocol_reasons(runner, batch):
         "init_forward_metadata_for_breakable_cuda_graph_capture",
         "prepare_forward_metadata_for_breakable_cuda_graph_replay",
     )
-    if runtime is None or not query_graph_allowed(runtime, batch, "prefill"):
+    if runtime is None:
+        return ("memt_query_veto",)
+    # Under DP attention a rank can be decoding while another rank prefills.
+    # It still votes on the prefill graph; label it as the mixed-phase case
+    # rather than as a non-query request. Only the label differs:
+    # any reason vetoes replay.
+    if batch.forward_mode.is_decode():
+        return ("dp_phase_mixed",)
+    if not query_graph_allowed(runtime, batch, "prefill"):
         return ("memt_query_veto",)
     original_mode = getattr(batch, "_original_forward_mode", None)
     if original_mode is not None and not original_mode.is_extend():
@@ -616,6 +625,17 @@ def _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank
         )
         batch._memt_flash_prefill_allowed = agreement.allowed
         _count(runner, "admissions" if agreement.allowed else "fallbacks")
+        # Idle ranks vote but run no prefill tokens; count each decision on the
+        # ranks that actually prefilled so buckets reflect real token counts.
+        counts = local.original_counts
+        if not counts or local.rank >= len(counts) or counts[local.rank] > 0:
+            graph_stats.record(
+                phase="prefill",
+                key=len(batch.input_ids),
+                gear=agreement.bucket if agreement.allowed else None,
+                admitted=agreement.allowed,
+                reasons=agreement.reasons,
+            )
         if replay_observer is not None:
             replay_observer({"event": "replay_admission", "rank": local.rank,
                              "allowed": agreement.allowed, "bucket": agreement.bucket,

@@ -2,7 +2,26 @@
 
 from functools import wraps
 
+from . import graph_stats
 from .decode_graph import query_graph_allowed
+
+
+def _record(runner, batch, admitted, reasons):
+    """Zero-cost label for one admission decision; never changes the outcome.
+
+    Flash installs both this guard and the DP prefill consensus, which records
+    the same decision with authoritative reasons. Skip here so one decision is
+    counted once; the consensus sets `_memt_flash_prefill_allowed` first.
+    """
+    if hasattr(batch, "_memt_flash_prefill_allowed"):
+        return
+    tokens = len(batch.input_ids)
+    gear = None
+    if admitted:
+        gear = next((size for size in runner.capture_num_tokens if size >= tokens), None)
+    graph_stats.record(
+        phase="prefill", key=tokens, gear=gear, admitted=admitted, reasons=reasons
+    )
 
 
 def live_prefill_tokens(batch):
@@ -33,6 +52,28 @@ def live_prefill_tokens(batch):
     ):
         raise ValueError("Live prefill token metadata disagrees with request spans")
     return valid
+
+
+def _admission_reasons(self, runtime, batch):
+    """Classify a fallback for the counters; never decides the outcome.
+
+    Native returns only a boolean, so the two rejection rules it documents are
+    re-derived here purely to label why it said no. Order matters:
+    the MemT query veto happens before native is consulted.
+    """
+    if not query_graph_allowed(runtime, batch, "prefill"):
+        return ("memt_query_veto",)
+    try:
+        valid = live_prefill_tokens(batch)
+    except ValueError:
+        return ("native_veto_other",)
+    tokens = self.capture_num_tokens
+    if tokens and valid > max(tokens):
+        return ("over_max_gear",)
+    bucket = next((size for size in tokens if size >= valid), None)
+    if bucket is not None and bucket > valid * 2:
+        return ("below_padding_factor",)
+    return ("native_veto_other",)
 
 
 def install_prefill_query_guard(*, exact_tokens=False):
@@ -74,18 +115,25 @@ def install_prefill_query_guard(*, exact_tokens=False):
     def can_run(self, batch):
         runtime = getattr(self.model_runner.model, "memt_runtime", None)
         if runtime is not None and not query_graph_allowed(runtime, batch, "prefill"):
+            _record(self, batch, False, ("memt_query_veto",))
             return False
         if runtime is not None:
             try:
                 live_prefill_tokens(batch)
             except ValueError:
+                _record(self, batch, False, ("native_veto_other",))
                 return False
         # Retained solely for controlled historical diagnostics. Production
         # uses native gear padding after validating effective request metadata.
         if runtime is not None and exact_tokens:
             if len(batch.input_ids) not in self.capture_num_tokens:
+                _record(self, batch, False, ("over_max_gear",))
                 return False
-        return original(self, batch)
+        allowed = original(self, batch)
+        if runtime is not None:
+            _record(self, batch, allowed,
+                    () if allowed else _admission_reasons(self, runtime, batch))
+        return allowed
 
     can_run._memt_query_guard = True
     can_run._memt_exact_tokens = exact_tokens
