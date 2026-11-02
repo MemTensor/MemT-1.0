@@ -267,9 +267,11 @@ def explicit_capture_config(intent):
 
     Explicit backend already skips native's blanket cascade (server_args:3656).
     validate_capture_request MUST run after resolution and before construction.
+    Topology is deliberately NOT checked here: this runs before SGLang parses
+    --tp/--dp/--ep, so the real sizes are not known yet. See _check_capture_scope.
     """
     if (
-        intent.requested_backend != "breakable" or intent.dp_size != 4
+        intent.requested_backend != "breakable"
         or not intent.capture_tokens
         or not set(intent.capture_tokens) <= set(CAPTURE_TOKEN_GEARS)
     ):
@@ -299,11 +301,10 @@ def audited_native_validator(source, namespace):
 
 
 def _check_capture_scope(args, intent):
-    explicit_capture_config(intent)
     resolved = args._resolved()
     config = args.get_model_config()
     required = {
-        "device": "cuda", "tp_size": 4, "dp_size": 4, "ep_size": 4,
+        "device": "cuda",
         "pp_size": 1, "dcp_size": 1, "disable_overlap_schedule": True,
         "enable_two_batch_overlap": False, "enable_memory_saver": False,
         "disaggregation_mode": "null", "enable_torch_compile": False,
@@ -313,8 +314,21 @@ def _check_capture_scope(args, intent):
         "enable_eplb": False, "debug_cuda_graph": False,
     }
     mismatches = [key for key, value in required.items() if getattr(args, key, None) != value]
+    # Replay consensus gathers one vote per DP rank on the world CPU group, then
+    # requires len(votes) == dp_size. That only lines up when every rank owns one
+    # attention replica, so the layout needs attention TP1 (tp == dp) and the
+    # MoE split that was validated (ep == tp). Any DP >= 2 qualifies; the
+    # 4-rank layout is the tested one, not a support boundary.
+    tp_size = getattr(args, "tp_size", None)
+    dp_size = getattr(args, "dp_size", None)
+    ep_size = getattr(args, "ep_size", None)
+    layout_ok = (
+        type(tp_size) is int and type(dp_size) is int and type(ep_size) is int
+        and dp_size >= 2 and tp_size == dp_size and ep_size == tp_size
+    )
     if (
-        mismatches or config.hf_config.model_type != "memt_deepseek_v4"
+        mismatches or not layout_ok
+        or config.hf_config.model_type != "memt_deepseek_v4"
         or config.is_multimodal or not resolved.enable_dp_attention
         or resolved.attn_cp_size != 1 or resolved.moe_a2a_backend != "none"
         or resolved.quantization is not None
@@ -322,7 +336,12 @@ def _check_capture_scope(args, intent):
         or args.expert_distribution_recorder_mode is not None
         or args.load_format not in ("auto", "safetensors")
     ):
-        raise ValueError(f"Outside Flash capture scope: {mismatches}")
+        detail = mismatches + ([] if layout_ok else
+                               [f"layout tp={tp_size} dp={dp_size} ep={ep_size}"])
+        raise ValueError(
+            "Outside Flash capture scope (needs attention TP1: tp == dp == ep, DP >= 2): "
+            + ", ".join(detail)
+        )
 
 
 def validate_capture_request(args, intent, *, native_validator=None):

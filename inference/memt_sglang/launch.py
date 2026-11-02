@@ -22,6 +22,39 @@ from memt_sglang.validation import (
     validate_server_args,
 )
 
+_DP_FLAGS = ("--dp-size", "--data-parallel-size")
+
+
+def _requested_dp_size(argv):
+    """Read the DP size from argv before native parsing.
+
+    FlashPrefillIntent must exist before SGLang resolves arguments, but the
+    replay consensus gathers one vote per DP rank, so the intent needs the real
+    size. Only the canonical flag and its documented alias are parsed here;
+    resolve_flash_prefill() cross-checks the result against args.dp_size, which
+    is what native actually resolved (including abbreviations and config
+    merging). Returns None when the flag is absent.
+    """
+    found = None
+    for index, value in enumerate(argv):
+        flag, separator, inline = value.partition("=")
+        if flag not in _DP_FLAGS:
+            continue
+        if separator:
+            raw = inline
+        elif index + 1 < len(argv):
+            raw = argv[index + 1]
+        else:
+            raise ValueError(f"{flag} requires a value")
+        try:
+            parsed = int(raw)
+        except ValueError:
+            raise ValueError(f"{flag} must be an integer, got {raw!r}") from None
+        if found is not None and found != parsed:
+            raise ValueError(f"Conflicting DP size flags: {found} and {parsed}")
+        found = parsed
+    return found
+
 
 def _flash_prefill_config(rest, graph):
     """Normalize an explicit Flash request before native resolution can change it."""
@@ -46,7 +79,14 @@ def _flash_prefill_config(rest, graph):
     tokens = phase.get("bs", [512, 1024]) if backend == "breakable" else []
     if not isinstance(tokens, list):
         raise ValueError("Flash prefill bs must be a list")
-    intent = FlashPrefillIntent(backend, tuple(tokens), 4)
+    dp_size = _requested_dp_size(rest)
+    if dp_size is None:
+        if backend == "breakable":
+            raise ValueError(
+                "Flash prefill graph requires an explicit --dp-size (attention TP1)"
+            )
+        dp_size = 1
+    intent = FlashPrefillIntent(backend, tuple(tokens), dp_size)
     if backend == "breakable":
         bounded = explicit_capture_config(intent)
         if "max_bs" in phase and phase["max_bs"] != bounded["max_bs"]:
@@ -193,6 +233,8 @@ def redacted_argv(argv):
 
 def resolve_flash_prefill(options, args, identity):
     """Validate before publishing the explicit request to spawned workers."""
+    from dataclasses import replace
+
     from memt_sglang.runtime.flash_prefill import (
         prefill_identity,
         validate_capture_request,
@@ -202,6 +244,16 @@ def resolve_flash_prefill(options, args, identity):
     intent = options.flash_prefill_intent
     if intent is None:
         return identity
+    if intent.requested_backend == "breakable":
+        # The pre-parse intent carries the DP size from argv; native is the
+        # authority. A mismatch means an unparsed form (abbreviation, merged
+        # config) reached SGLang, and the replay vote count would be wrong.
+        if getattr(args, "dp_size", None) != intent.dp_size:
+            raise ValueError(
+                "Flash prefill DP size differs from the resolved argument: "
+                f"requested {intent.dp_size}, resolved {getattr(args, 'dp_size', None)}"
+            )
+        intent = replace(intent, dp_size=args.dp_size)
     phase = args.cuda_graph_config.prefill
     receipt = prefill_identity(intent, phase)
     if phase.backend != "disabled":

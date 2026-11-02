@@ -19,7 +19,7 @@ def model(monkeypatch, tmp_path):
     for key in ("MEMT_EXPERIMENT_PREFILL_GRAPH", "MEMT_EXPERIMENT_DECODE_GRAPH",
                 "MEMT_FLASH_PREFILL_REQUEST"):
         monkeypatch.delenv(key, raising=False)
-    return ["--model-path", str(tmp_path)]
+    return ["--model-path", str(tmp_path), "--dp-size", "4"]
 
 
 def graph(engine):
@@ -86,6 +86,44 @@ def test_explicit_disable_overrides_env_and_decode_only_stays_prefill_off(model,
     _, engine, _ = launch.prepare(model + ["--cuda-graph-config", '{"decode":{"backend":"breakable"}}'])
     assert graph(engine)["prefill"]["backend"] == "disabled"
     assert graph(engine)["decode"]["backend"] == "breakable"
+
+
+@pytest.mark.parametrize("dp_args", [
+    ["--dp-size", "8"],
+    ["--data-parallel-size", "8"],
+    ["--dp-size=8"],
+])
+def test_flash_intent_carries_requested_dp_size(model, monkeypatch, dp_args):
+    """The replay vote count follows --dp-size, not a constant (review R1)."""
+    monkeypatch.setenv("MEMT_EXPERIMENT_PREFILL_GRAPH", "1")
+    options, _, _ = launch.prepare(model[:2] + dp_args)
+    assert options.flash_prefill_intent.dp_size == 8
+
+
+def test_flash_request_rejected_when_resolved_dp_disagrees(model, monkeypatch):
+    """A DP flag form native understands but this parser missed must not pass."""
+    monkeypatch.setenv("MEMT_EXPERIMENT_PREFILL_GRAPH", "1")
+    options, _, identity = launch.prepare(model[:2] + ["--dp-size", "8"])
+    args = NS(cuda_graph_config=NS(prefill=NS(backend="breakable", bs=[512, 1024])), dp_size=4)
+    with pytest.raises(ValueError, match="DP size differs"):
+        launch.resolve_flash_prefill(options, args, identity)
+    assert "MEMT_FLASH_PREFILL_REQUEST" not in launch.os.environ
+
+
+def test_flash_request_requires_explicit_dp_size(model, monkeypatch):
+    monkeypatch.setenv("MEMT_EXPERIMENT_PREFILL_GRAPH", "1")
+    with pytest.raises(ValueError, match="--dp-size"):
+        launch.prepare(model[:2])
+
+
+@pytest.mark.parametrize("dp_args", [
+    ["--dp-size", "8", "--dp-size", "4"],
+    ["--dp-size", "8", "--data-parallel-size", "4"],
+])
+def test_conflicting_dp_flags_rejected(model, monkeypatch, dp_args):
+    monkeypatch.setenv("MEMT_EXPERIMENT_PREFILL_GRAPH", "1")
+    with pytest.raises(ValueError, match="Conflicting DP size"):
+        launch.prepare(model[:2] + dp_args)
 
 
 def test_resolve_runs_gate_before_publishing_request_and_records_native_identity(model, monkeypatch):

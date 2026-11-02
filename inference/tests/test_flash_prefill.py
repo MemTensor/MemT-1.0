@@ -341,10 +341,14 @@ def test_explicit_config_uses_native_lock_and_locks_max_bs_too():
     for invalid in (
         FlashPrefillIntent("disabled", (), 4),
         FlashPrefillIntent("breakable", (256, 512), 4),
-        FlashPrefillIntent("breakable", (512,), 2),
     ):
         with pytest.raises(ValueError):
             fp.explicit_capture_config(invalid)
+    # Topology is not known before SGLang resolves --tp/--dp/--ep, so this
+    # pre-parse step must not gate on DP size (review R1).
+    assert fp.explicit_capture_config(FlashPrefillIntent("breakable", (512,), 2)) == {
+        "backend": "breakable", "bs": [512], "max_bs": 512
+    }
 
 
 def native_server_method(name):
@@ -420,7 +424,7 @@ def test_config_gate_rechecks_native_vetoes_despite_explicit_lock(monkeypatch):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("device", "cpu"), ("tp_size", 2), ("dp_size", 8), ("pp_size", 2),
+    ("device", "cpu"), ("pp_size", 2),
     ("disable_overlap_schedule", False), ("enable_two_batch_overlap", True),
     ("enable_memory_saver", True), ("speculative_algorithm", "EAGLE"),
     ("disaggregation_mode", "prefill"), ("enable_torch_compile", True),
@@ -430,6 +434,31 @@ def test_capture_scope_rejects_unqualified_paths(field, value):
     setattr(args, field, value)
     with pytest.raises(ValueError):
         fp.validate_capture_request(args, FlashPrefillIntent("breakable", (512, 1024), 4), native_validator=lambda a: None)
+
+
+@pytest.mark.parametrize("tp,dp,ep", [(8, 8, 8), (2, 2, 2)])
+def test_capture_scope_accepts_attention_tp1_layouts_other_than_dp4(tp, dp, ep):
+    """DP4 is a validation range, not a support boundary (review R1)."""
+    args, _ = config_args()
+    args.tp_size, args.dp_size, args.ep_size = tp, dp, ep
+    receipt = fp.validate_capture_request(
+        args, FlashPrefillIntent("breakable", (512, 1024), dp), native_validator=lambda a: None)
+    assert receipt["status"] == "capture_attempt_permitted"
+
+
+@pytest.mark.parametrize("tp,dp,ep", [
+    (4, 8, 8),   # attention TP2: one world rank per attention replica is not guaranteed
+    (8, 8, 4),   # MoE split differs from the validated one
+    (4, 4, 8),
+    (4, 1, 4),   # no cross-rank consensus at all
+    (True, 4, 4),
+])
+def test_capture_scope_rejects_layouts_without_attention_tp1(tp, dp, ep):
+    args, _ = config_args()
+    args.tp_size, args.dp_size, args.ep_size = tp, dp, ep
+    with pytest.raises(ValueError, match="attention TP1"):
+        fp.validate_capture_request(
+            args, FlashPrefillIntent("breakable", (512, 1024), 4), native_validator=lambda a: None)
 
 
 def metadata():
