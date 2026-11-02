@@ -127,3 +127,10 @@ to the native implementation. CPU tests execute the actual patched function
 for multiple widths/partitions; native-kernel and model-level GPU checks are
 still required for changed partitions. No alternative partition is promoted
 as qualified by these CPU checks.
+
+Public dependency additions were formatted without reformatting unrelated
+upstream code. An AST comparison confirmed that these formatting edits preserve
+the Python programs. The seven-file manifest was regenerated and all 305 core
+CPU tests plus 12 subtests pass against the formatted dependency. Performance
+batch sources remain frozen separately; their results must keep those exact
+revision/patch identities.

@@ -175,10 +175,10 @@ index b1ccd24..c0a8ef0 100644
      }
    }
 diff --git a/python/sglang/jit_kernel/dsv4/topk.py b/python/sglang/jit_kernel/dsv4/topk.py
-index fdaedfd..1f38c16 100644
+index fdaedfd..641fa7f 100644
 --- a/python/sglang/jit_kernel/dsv4/topk.py
 +++ b/python/sglang/jit_kernel/dsv4/topk.py
-@@ -16,15 +16,15 @@ from .utils import make_name
+@@ -16,15 +16,18 @@ from .utils import make_name
  
  
  @cache_once
@@ -188,16 +188,19 @@ index fdaedfd..1f38c16 100644
      assert topk in (512, 1024), "Only support topk=512 or 1024"
      return load_jit(
 -        make_name(f"topk_v1_{topk}"),
-+        make_name(f"topk_v1_stable_exact_v1_{topk}" if stable_exact else f"topk_v1_{topk}"),
++        make_name(
++            f"topk_v1_stable_exact_v1_{topk}" if stable_exact else f"topk_v1_{topk}"
++        ),
          *args,
          cuda_files=["deepseek_v4/topk_v1.cuh"],
          cuda_wrappers=[("topk_transform", f"TopKKernel<{args}>::transform")],
 -        extra_cuda_cflags=[f"-DSGL_TOPK={topk}"],
-+        extra_cuda_cflags=[f"-DSGL_TOPK={topk}"] + (["-DSGL_DSV4_STABLE_EXACT_TOPK=1"] if stable_exact else []),
++        extra_cuda_cflags=[f"-DSGL_TOPK={topk}"]
++        + (["-DSGL_DSV4_STABLE_EXACT_TOPK=1"] if stable_exact else []),
      )
  
  
-@@ -61,6 +61,30 @@ def topk_transform_512(
+@@ -61,6 +64,32 @@ def topk_transform_512(
          )
  
  
@@ -222,14 +225,16 @@ index fdaedfd..1f38c16 100644
 +    if scores.shape[0] == 0:
 +        return
 +    module = _jit_topk_v1_module(out_page_indices.shape[1], True)
-+    module.topk_transform(scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices)
++    module.topk_transform(
++        scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices
++    )
 +
 +
  # metadata is (batch+1, 2) int32: row 0 = {cluster_threshold, num_cluster_items};
  # rows 1..N = {batch_id, seq_len} of items routed to the persistent cluster pool.
  _PLAN_METADATA_INTS_PER_BATCH = 2
 diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
-index 190d408..88fb618 100644
+index 190d408..2ff2ce5 100644
 --- a/python/sglang/kernels/ops/layernorm/mhc.py
 +++ b/python/sglang/kernels/ops/layernorm/mhc.py
 @@ -2,6 +2,7 @@ import functools
@@ -240,7 +245,7 @@ index 190d408..88fb618 100644
  import threading
  from typing import Tuple
  
-@@ -539,7 +540,22 @@ def mhc_pre_gemm_sqrsum_splitk_kernel(
+@@ -539,7 +540,23 @@ def mhc_pre_gemm_sqrsum_splitk_kernel(
      )
  
  
@@ -249,7 +254,8 @@ index 190d408..88fb618 100644
 +
  def _compute_num_split_for_mhc_pre(num_tokens: int, hc_hidden_size: int) -> int:
 +    if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower() in (
-+        "1", "true"
++        "1",
++        "true",
 +    ):
 +        fixed = os.environ.get("SGLANG_DSV4_MHC_FIXED_SPLITS")
 +        if fixed is not None:
@@ -264,7 +270,7 @@ index 190d408..88fb618 100644
      grid_size = (num_tokens + block_m - 1) // block_m
      num_block_k = (hc_hidden_size + block_k - 1) // block_k
 diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
-index c46a8c5..3c9a147 100644
+index c46a8c5..e72fd2d 100644
 --- a/python/sglang/srt/managers/scheduler.py
 +++ b/python/sglang/srt/managers/scheduler.py
 @@ -289,6 +289,8 @@ else:
@@ -276,7 +282,7 @@ index c46a8c5..3c9a147 100644
  logger = logging.getLogger(__name__)
  
  # Test retract decode for debugging purposes
-@@ -2783,7 +2785,14 @@ class Scheduler(
+@@ -2783,7 +2785,18 @@ class Scheduler(
          need_mlp_sync = self.require_mlp_sync
          if (
              need_mlp_sync
@@ -285,15 +291,19 @@ index c46a8c5..3c9a147 100644
 +                not self.spec_algorithm.is_none()
 +                or (
 +                    self.server_args.attention_backend == "dsv4"
-+                    and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower() in ("1", "true")
-+                    and os.environ.get("SGLANG_DSV4_ISOLATE_PREFILL_DECODE", "0").lower() in ("1", "true")
++                    and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++                    in ("1", "true")
++                    and os.environ.get(
++                        "SGLANG_DSV4_ISOLATE_PREFILL_DECODE", "0"
++                    ).lower()
++                    in ("1", "true")
 +                )
 +            )
              and not self.server_args.speculative_skip_dp_mlp_sync
          ):
              # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.
 diff --git a/python/sglang/srt/models/deepseek_v2.py b/python/sglang/srt/models/deepseek_v2.py
-index a406c08..87ebf06 100644
+index a406c08..e548f69 100644
 --- a/python/sglang/srt/models/deepseek_v2.py
 +++ b/python/sglang/srt/models/deepseek_v2.py
 @@ -21,6 +21,7 @@
@@ -304,15 +314,13 @@ index a406c08..87ebf06 100644
  from contextlib import nullcontext
  from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
  
-@@ -493,6 +494,15 @@ class MoEGate(nn.Module):
+@@ -493,6 +494,13 @@ class MoEGate(nn.Module):
                  True,  # is_vnni
              )
  
-+        if (
-+            self.is_deepseek_v4
-+            and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
-+            in ("1", "true")
-+        ):
++        if self.is_deepseek_v4 and os.environ.get(
++            "SGLANG_DSV4_DETERMINISTIC_PROFILE", "0"
++        ).lower() in ("1", "true"):
 +            # DSV4 hash_topk expects FP32 router logits. Keep that contract
 +            # when the explicit deterministic profile replaces router GEMMs.
 +            return F.linear(hidden_states.float(), self.weight.float(), None)
@@ -320,16 +328,18 @@ index a406c08..87ebf06 100644
          if get_server_args().enable_deterministic_inference:
              return F.linear(hidden_states, self.weight, None)
  
-@@ -536,6 +546,20 @@ class MoEGate(nn.Module):
+@@ -536,6 +544,22 @@ class MoEGate(nn.Module):
          return logits
  
  
 +DSV4_MOE_COMBINE_FP32_API_VERSION = 1
 +
++
 +def _dsv4_profile_all_reduce(value, *, is_dsv4):
 +    if (
 +        is_dsv4
-+        and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower() in ("1", "true")
++        and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++        in ("1", "true")
 +        and os.environ.get("SGLANG_DSV4_MOE_COMBINE_FP32", "0").lower() in ("1", "true")
 +    ):
 +        # Keep expert kernels and their BF16 partial outputs unchanged. Only
@@ -341,35 +351,41 @@ index a406c08..87ebf06 100644
  class DeepseekV2MoE(nn.Module):
  
      def __init__(
-@@ -1014,7 +1038,7 @@ class DeepseekV2MoE(nn.Module):
+@@ -1014,7 +1038,9 @@ class DeepseekV2MoE(nn.Module):
          if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
              is_tp_path=True,
          ):
 -            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-+            final_hidden_states = _dsv4_profile_all_reduce(final_hidden_states, is_dsv4=self.gate.is_deepseek_v4)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
          # TP1 shared experts are replicated, so add them after all-reduce to
          # avoid summing the same shared output once per TP rank.
          if self._shared_expert_tp1:
-@@ -1136,7 +1160,7 @@ class DeepseekV2MoE(nn.Module):
+@@ -1136,7 +1162,9 @@ class DeepseekV2MoE(nn.Module):
          if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
              is_tp_path=True,
          ):
 -            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-+            final_hidden_states = _dsv4_profile_all_reduce(final_hidden_states, is_dsv4=self.gate.is_deepseek_v4)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
          # TP1 shared experts are replicated, so add them after all-reduce to
          # avoid summing the same shared output once per TP rank.
          if shared_output is not None and self._shared_expert_tp1:
-@@ -1195,7 +1219,7 @@ class DeepseekV2MoE(nn.Module):
+@@ -1195,7 +1223,9 @@ class DeepseekV2MoE(nn.Module):
              True,  # is_vnni
          )
          if self.tp_size > 1 and not get_forward().fuse_mlp_allreduce:
 -            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-+            final_hidden_states = _dsv4_profile_all_reduce(final_hidden_states, is_dsv4=self.gate.is_deepseek_v4)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
          return final_hidden_states
  
      def forward_deepep(
 diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
-index 2648061..a510d13 100644
+index 2648061..8085cee 100644
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
 @@ -191,6 +191,8 @@ def _get_mhc_ops() -> MhcOps:
@@ -385,8 +401,8 @@ index 2648061..a510d13 100644
          prefix: str = "",
      ) -> None:
          super().__init__()
-+        self._pin_decode_graph_owners = (
-+            get_bool_env_var("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES")
++        self._pin_decode_graph_owners = get_bool_env_var(
++            "SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"
 +        )
 +        # Retain every capture version until model teardown; never replace
 +        # these owners with tensors from an eager fallback or a later bucket.
@@ -410,17 +426,22 @@ index 2648061..a510d13 100644
                      if use_fused:
                          completed = layer.hc_post(
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
-index 838b925..0468c1f 100644
+index 838b925..1cc7987 100644
 --- a/python/sglang/srt/server_args.py
 +++ b/python/sglang/srt/server_args.py
-@@ -220,7 +220,10 @@ ATTENTION_BACKEND_CHOICES = [
+@@ -220,7 +220,15 @@ ATTENTION_BACKEND_CHOICES = [
      "intel_xpu",
  ]
  
 +DSV4_DETERMINISTIC_PROFILE_API_VERSION = 1
 +
  DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
-+    *(["dsv4"] if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower() in ("1", "true") else []),
++    *(
++        ["dsv4"]
++        if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++        in ("1", "true")
++        else []
++    ),
      "ascend",
      "fa3",
      "fa4",

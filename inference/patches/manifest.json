@@ -2,13 +2,13 @@
   "base_commit": "fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1",
   "files_sha256": {
     "jit_kernel/csrc/deepseek_v4/topk_v1.cuh": "9ea22b1c8d56444875f2fe3205312ff4803411fc9b7964dc500f149ca2b328c2",
-    "jit_kernel/dsv4/topk.py": "1b8f8495c444c33929d7a9abbf43bc39ccade2d36e8427dec23447e2b98a0159",
-    "srt/models/deepseek_v2.py": "28100dbfeaecfac4cb8ec75a48d6ddad617fdf4578e0249821a363438b19a34a",
-    "srt/server_args.py": "e08129c6b5621895ecc901a787fe5f527079f56a627176ae524d333fd1dec008",
-    "kernels/ops/layernorm/mhc.py": "40fc431b45c0b0a4282c1aa0f8c616170fccc62727aa2b1c0056397643efd9f9",
-    "srt/managers/scheduler.py": "6b6b72c5f353ed7430e655a0c6091e5002bfcc9a2e165bce21667f0728da820d",
-    "srt/models/deepseek_v4.py": "2b413c020a24ee2d5b46e17773811faca0de27ec7b7d897b57d8a955eef30af0"
+    "jit_kernel/dsv4/topk.py": "92f0d83dba548af3ee9b65380995a8fc443a34ef5b4c8d89993fdb7ab7aacdbd",
+    "srt/models/deepseek_v2.py": "4db6e389dd3c1e95c70eba4ca6c9400663b321159b7490691b147a3407e0124e",
+    "srt/server_args.py": "9cec11c62f594ee92a168cde0b810fd0b74b9adcc2b3c3d306c8038bcf7df739",
+    "kernels/ops/layernorm/mhc.py": "a842d0b45bf7b35915a944e2cb0dfb66be0c4774fe0dc4ed3a820df362a74e25",
+    "srt/managers/scheduler.py": "fe4a259cb724c35fcf37ec7a8148091db4961d7fae99aff42b152352270edac9",
+    "srt/models/deepseek_v4.py": "c212655f86908eabfe8115cc1f20c8ec2d9117eefdcaacb704de3d0bbc91a629"
   },
-  "patch_sha256": "f3ec2bc8443850448148248da4fae7916031de838645e565c6c1fbe288861810",
+  "patch_sha256": "45f7506d9e2712ebf3216a78332415c0dca05c1d0429824425f2a16e4bb91bfb",
   "scope": "Patch against public pinned SGLang. Boolean-policy consistency regression tested on actual patched expressions; updated dependency GPU acceptance pending."
 }
