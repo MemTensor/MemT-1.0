@@ -86,3 +86,23 @@ Core 分支恢复 atomic writer 的状态池和事务实现，仅保留 memory g
   不通过延长时间掩盖死锁，不自动重放提交结果不确定的事务。
 - Nano 首份真实非空 S/C32 图节点时间线已采集；Flash 同类采集进行中。
   profiler 数据与正式性能隔离，后续报告区分 GPU 算子累计时长、重叠和暴露等待。
+
+## Follow-up execution: policy cleanup
+
+The execution plan is active. The first change fixes a real configuration
+mismatch: the adapter accepted `true`/`TRUE` for native profile switches, while
+four patched dependency modules accepted only `1`. Both now use the same
+case-insensitive spelling. A regression evaluates the actual patched boolean
+expressions for enabled, disabled and absent inputs. Historical GPU attempts
+used `1`; this change does not reinterpret their results. GPU acceptance of the
+updated dependency is pending.
+
+The optional stable-C4 architecture qualification list and its override have
+been removed. CUDA availability, actual kernel width and dependency API checks
+remain. Hardware qualification belongs in validation evidence. Query-plan
+comments and test-module prose were corrected without changing tensor math.
+
+Remaining plan-A work includes fixed mHC split geometry, query chunk budgets,
+prewarm/default launch policy, and documenting supported integration boundaries.
+This checkpoint is not a declaration that the complete cleanup has passed GPU
+acceptance or that subsequent performance candidates are ready for integration.

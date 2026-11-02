@@ -3,12 +3,12 @@
   "files_sha256": {
     "jit_kernel/csrc/deepseek_v4/topk_v1.cuh": "9ea22b1c8d56444875f2fe3205312ff4803411fc9b7964dc500f149ca2b328c2",
     "jit_kernel/dsv4/topk.py": "1b8f8495c444c33929d7a9abbf43bc39ccade2d36e8427dec23447e2b98a0159",
-    "srt/models/deepseek_v2.py": "9d3c42d92fdda87bba8f724531e7cdf25b1b7e0c4aedcfcfca0c4f955c75a3c2",
-    "srt/server_args.py": "ade9e6cef1f2d94b124faa114e022978c415b38f6e6aa545086ef326ebc1145b",
-    "kernels/ops/layernorm/mhc.py": "6f0d31ec40c2e7817d643b2e9a563053214de0dd87555470f33d897f2d4fa5f0",
-    "srt/managers/scheduler.py": "a4e18a4a15af4da954b05818202adf1edcca43c22f0e5772b4373344d0b2981c",
+    "srt/models/deepseek_v2.py": "28100dbfeaecfac4cb8ec75a48d6ddad617fdf4578e0249821a363438b19a34a",
+    "srt/server_args.py": "e08129c6b5621895ecc901a787fe5f527079f56a627176ae524d333fd1dec008",
+    "kernels/ops/layernorm/mhc.py": "66d6d06bbb4a891d70803f36f2448a6c52435328f402782def9c0ac1953ea576",
+    "srt/managers/scheduler.py": "6b6b72c5f353ed7430e655a0c6091e5002bfcc9a2e165bce21667f0728da820d",
     "srt/models/deepseek_v4.py": "2b413c020a24ee2d5b46e17773811faca0de27ec7b7d897b57d8a955eef30af0"
   },
-  "patch_sha256": "d299827638564d7b21c2c1f63003dc6403d3b8ee56235c6a339ce0cd321ac511",
-  "scope": "Dependency files reproduced from public pinned source; identical to independent fast-mode GPU acceptance overlay. Adapter final-commit GPU acceptance pending."
+  "patch_sha256": "ae10bc6dab3bf4c93e182e64bc2b9fb102eaff56a5152c2b0975009c12ddec82",
+  "scope": "Patch against public pinned SGLang. Boolean-policy consistency regression tested on actual patched expressions; updated dependency GPU acceptance pending."
 }

@@ -1,10 +1,4 @@
-"""MEMT_NUMERICS tiers: default never rejects, explicit choices are enforced.
-
-Background: the tier split exists so numerical reproducibility is a user choice
-rather than a hard prerequisite of the memory decode graph. Measured on Nano,
-`fast` is 7.7% (C1) / 16.6% (C32) faster TPOT but reproduces 256/288 rounds at
-concurrency 32 versus 288/288 under `strict`.
-"""
+"""Numerics profiles are optional and independent of graph pointer lifetime."""
 
 import os
 import unittest

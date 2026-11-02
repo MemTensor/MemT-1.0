@@ -1,6 +1,5 @@
 """Fail closed on unsupported stable C4 backends and Flash graph profiles."""
 
-import logging
 import os
 import sys
 import unittest
@@ -102,91 +101,23 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class StableC4ArchitectureGateTests(unittest.TestCase):
-    """The architecture gate has to be a record of what was measured, not a wall.
-
-    The kernel carries no architecture branch, so the only thing standing between
-    an unlisted GPU and a startup failure is this policy. Two failure modes matter
-    and they pull in opposite directions:
-      - too strict: a user on a part nobody here could obtain cannot run at all
-        without editing the source, which is worse than running with a warning;
-      - too loose: a run on an unmeasured part gets quoted as validated.
-    The override plus the always-on warning is what buys both.
-    """
-
-    def _install(self, capability, environ, raises=None):
-        calls = []
+class StableC4CapabilityTests(unittest.TestCase):
+    def test_device_qualification_is_not_a_runtime_policy(self):
         native = NS(
-            STABLE_EXACT_TOPK_API_VERSION=stable_c4.STABLE_TOPK_API_VERSION,
-            **{stable_c4.STABLE_TOPK_SYMBOL: lambda *a: calls.append(a)},
+            STABLE_EXACT_TOPK_API_VERSION=1,
+            topk_transform_512_stable=lambda *args: None,
         )
         indexer = NS()
-        torch = NS(
-            cuda=NS(is_available=lambda: True, get_device_capability=lambda: capability)
-        )
-
-        def modules(name):
-            return native if name.endswith(".topk") else indexer
-
+        # Installation requires CUDA and the real API, not a device-name list.
+        # Omitting get_device_capability catches a reintroduced architecture gate.
+        torch = NS(cuda=NS(is_available=lambda: True))
         with (
             patch.dict(sys.modules, {"torch": torch}),
-            patch.dict(os.environ, environ, clear=False),
-            patch.object(stable_c4, "import_module", side_effect=modules),
+            patch.object(stable_c4, "import_module", side_effect=[native, indexer]),
         ):
-            if raises:
-                with self.assertRaisesRegex(ValueError, raises):
-                    stable_c4.install({"index_topk": 512})
-                return None
-            # assertLogs FAILS when nothing is logged, and "nothing is logged" is
-            # exactly the expected result on a qualified part -- so capture with a
-            # handler instead and let the caller assert on an empty list.
-            records = []
-            logger = logging.getLogger(stable_c4.__name__)
-            handler = logging.Handler()
-            handler.emit = records.append
-            handler.setLevel(logging.WARNING)
-            logger.addHandler(handler)
-            try:
-                stable_c4.install({"index_topk": 512})
-            finally:
-                logger.removeHandler(handler)
-            return [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+            stable_c4.install({"index_topk": 512})
+        self.assertTrue(indexer._memt_c4_stable_topk)
 
-    def test_unqualified_device_runs_with_warning_by_default(self):
-        with patch.dict(os.environ, {}, clear=True):
-            logs = self._install((9, 0), {})
-        self.assertTrue(logs)
-
-    def test_override_admits_one_explicit_capability(self):
-        logs = self._install((9, 0), {stable_c4.ARCH_OVERRIDE_VARIABLE: "9.0"})
-        self.assertTrue(logs)
-        self.assertIn("have not been measured", " ".join(logs).lower())
-
-    def test_override_any_admits_anything(self):
-        logs = self._install((12, 0), {stable_c4.ARCH_OVERRIDE_VARIABLE: "any"})
-        self.assertTrue(any("outside the qualified set" in line for line in logs))
-
-    def test_qualified_device_is_silent(self):
-        logs = self._install((10, 3), {})
-        self.assertEqual(logs, [])
-
-    def test_malformed_override_is_an_explicit_error(self):
-        self._install(
-            (10, 3), {stable_c4.ARCH_OVERRIDE_VARIABLE: "sm103"}, raises="major.minor"
-        )
-
-    def test_override_list_rejects_unlisted_capability(self):
-        self._install(
-            (10, 0),
-            {stable_c4.ARCH_OVERRIDE_VARIABLE: "9.0,10.3"},
-            raises="qualified on",
-        )
-
-    def test_width_constant_drives_the_symbol_names(self):
-        # Guards against the width and the symbol drifting apart: the overlay's
-        # symbol is derived, so a mismatch shows up here rather than at startup.
-        self.assertEqual(stable_c4.STABLE_TOPK_WIDTH, 512)
-        self.assertEqual(
-            stable_c4.STABLE_TOPK_SYMBOL,
-            f"topk_transform_{stable_c4.STABLE_TOPK_WIDTH}_stable",
-        )
+    def test_fixed_kernel_width_remains_an_implementation_constraint(self):
+        with self.assertRaisesRegex(ValueError, "no kernel for width 256"):
+            stable_c4.install({"index_topk": 256})
