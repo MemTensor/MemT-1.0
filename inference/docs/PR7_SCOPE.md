@@ -18,3 +18,6 @@ Tests for an extracted feature travel with its branch. Removed production
 reference modes and diagnostic injection points must not be reintroduced merely
 to reuse a benchmark. Standalone acceptance/profiling tools stay outside the
 installed memt_sglang package and record any instrumentation separately.
+
+Current execution constraints and their implementation reasons are documented in
+[INTEGRATION_CONSTRAINTS.md](INTEGRATION_CONSTRAINTS.md).

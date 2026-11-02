@@ -9,6 +9,9 @@ from pathlib import Path
 from memt_sglang.models.common.hf_config import memt_model
 from memt_sglang.runtime.config import RuntimeConfig
 
+# Integration reasons and extension requirements are documented in
+# docs/INTEGRATION_CONSTRAINTS.md; these are implementation boundaries, not
+# benchmark qualification lists.
 REQUIRED_SERVER_VALUES = {
     "disable_radix_cache": True,
     "pp_size": 1,
