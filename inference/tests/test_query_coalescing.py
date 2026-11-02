@@ -5,6 +5,9 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
+import pytest
+
+from memt_sglang import validation as _validation
 from memt_sglang.runtime import query_coalescing as m
 
 
@@ -326,3 +329,40 @@ class CoalescingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- layout validation (doc 04) --------------------------------------------
+
+
+@pytest.mark.parametrize("model,tp,dp,ep,dpa", [
+    ("memt-nano", 2, 1, 1, False),
+    ("memt-nano", 1, 1, 1, False),
+    ("memt-nano", 4, 1, 1, False),
+    ("memt-flash", 2, 2, 2, True),
+    ("memt-flash", 4, 4, 4, True),
+    ("memt-flash", 8, 8, 8, True),
+])
+def test_coalescing_layout_accepts_supported_layouts(model, tp, dp, ep, dpa):
+    args = NS(tp_size=tp, dp_size=dp, ep_size=ep, enable_dp_attention=dpa)
+    _validation._validate_query_coalescing_layout(args, model)
+
+
+@pytest.mark.parametrize("tp,dp,ep,dpa", [
+    (8, 4, 8, True),   # attention TP2: world rows != DP ranks
+    (8, 8, 4, True),   # unvalidated MoE split (ep != tp), kept out on purpose
+    (4, 1, 4, True),   # no cross-rank exchange
+    (4, 4, 4, False),  # Flash without DP attention
+])
+def test_coalescing_layout_rejects_flash_outside_attention_tp1(tp, dp, ep, dpa):
+    args = NS(tp_size=tp, dp_size=dp, ep_size=ep, enable_dp_attention=dpa)
+    with pytest.raises(ValueError, match="attention TP1"):
+        _validation._validate_query_coalescing_layout(args, "memt-flash")
+
+
+def test_single_rank_attention_group_skips_the_broadcast(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list",
+                        lambda *a, **k: pytest.fail("no peer to broadcast to"))
+    decision = {"wait": False}
+    assert m._broadcast_decision(NS(ps=NS(attn_tp_size=1)), decision) is decision

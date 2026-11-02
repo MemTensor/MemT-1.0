@@ -94,6 +94,26 @@ def validate_runtime_config(config, override, capacity_overrides):
     return asdict(RuntimeConfig.from_hf_config({"memt_runtime": runtime}))
 
 
+def _validate_query_coalescing_layout(args, model):
+    """Coalescing layouts: hard limits plus the validated Flash MoE split.
+
+    Nano: the TP leader broadcasts each decision on the attention-TP group, which
+    needs no DP attention (already enforced for Nano) and works for any TP size.
+    Flash: the DP path all-reduces one row per DP rank on the world group, so it
+    needs DP attention with attention TP1 (tp == dp) and DP >= 2. ep == tp is
+    not required by coalescing itself; it is kept so coalescing is only offered
+    on the MoE split that was validated, not on ep != tp layouts.
+    """
+    tp, dp, ep = args.tp_size, args.dp_size, args.ep_size
+    if model == "memt-nano":
+        return
+    if not (args.enable_dp_attention and dp >= 2 and tp == dp and ep == tp):
+        raise ValueError(
+            "Query coalescing on Flash requires DP attention with attention TP1 "
+            f"(tp == dp == ep, dp >= 2); got tp={tp}, dp={dp}, ep={ep}"
+        )
+
+
 def validate_server_args(
     args,
     model,
@@ -120,18 +140,7 @@ def validate_server_args(
     validate_overlap(args)
     validate_query_chunks(args)
     if config_from_env() is not None:
-        layout = (args.tp_size, args.dp_size, args.ep_size)
-        if not (
-            (model == "memt-nano" and layout == (2, 1, 1))
-            or (
-                model == "memt-flash"
-                and layout in ((4, 4, 4), (8, 8, 8))
-                and args.enable_dp_attention
-            )
-        ):
-            raise ValueError(
-                "Query coalescing requires Nano TP2/DP1/EP1 or Flash TP=DP=EP4/8"
-            )
+        _validate_query_coalescing_layout(args, model)
         if args.enable_prefill_delayer:
             raise ValueError(
                 "Query coalescing cannot be combined with native prefill delay"

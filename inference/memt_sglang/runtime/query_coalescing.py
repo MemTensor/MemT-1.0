@@ -1,4 +1,7 @@
-"""Bounded query coalescing at idle prefill boundaries, Nano TP2 / Flash DP4.
+"""Bounded query coalescing at idle prefill boundaries.
+
+Nano (no DP attention): the attention-TP leader decides and broadcasts.
+Flash (DP attention, attention TP1): ranks exchange observations on the world group.
 
 The request/token targets release a batch; they do not cap the native batch.
 Native admission, cancellation, state ownership, and commit execution stay intact.
@@ -84,8 +87,11 @@ def _broadcast_decision(scheduler, decision):
     import torch
 
     values = [decision]
-    # This experiment is guarded to TP2/DP1/PP1. Rank 0 owns the wall clock;
-    # using independent rank clocks can diverge before model collectives.
+    # Without DP attention every rank runs the same batch; rank 0 of the
+    # attention-TP group owns the wall clock so rank clocks cannot diverge
+    # before model collectives. A single-rank group needs no broadcast.
+    if scheduler.ps.attn_tp_size == 1:
+        return decision
     torch.distributed.broadcast_object_list(
         values, src=0, group=scheduler.attn_tp_cpu_group
     )
@@ -148,10 +154,8 @@ def _exchange_dp_observation(scheduler, observation):
 
 
 def _dp_prefill(scheduler, native, config, prefill_delayer_single_pass, running_batch):
-    if scheduler.ps.attn_tp_size != 1 or scheduler.server_args.dp_size not in (4, 8):
-        raise RuntimeError(
-            "DP query coalescing requires Flash attention TP1 / DP4 or DP8"
-        )
+    if scheduler.ps.attn_tp_size != 1:
+        raise RuntimeError("DP query coalescing requires attention TP1 (tp == dp)")
     policy = getattr(scheduler, "_memt_query_coalescer", None)
     if policy is None:
         policy = scheduler._memt_query_coalescer = QueryCoalescer(config)
@@ -253,10 +257,6 @@ def install_query_coalescing(scheduler_class, config):
         if bypass:
             policy.clear()
         else:
-            if self.ps.attn_tp_size != 2 or self.require_mlp_sync:
-                raise RuntimeError(
-                    "Experimental query coalescing requires Nano TP2/DP1"
-                )
             leader = self.ps.attn_tp_rank == 0
             decision = policy.decide(requests, time.monotonic()) if leader else None
             decision = _broadcast_decision(self, decision)
