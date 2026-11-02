@@ -76,7 +76,7 @@ def _admission_reasons(self, runtime, batch):
     return ("native_veto_other",)
 
 
-def install_prefill_query_guard(*, exact_tokens=False):
+def install_prefill_query_guard():
     from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
         PrefillCudaGraphRunner,
     )
@@ -123,12 +123,6 @@ def install_prefill_query_guard(*, exact_tokens=False):
             except ValueError:
                 _record(self, batch, False, ("native_veto_other",))
                 return False
-        # Retained solely for controlled historical diagnostics. Production
-        # uses native gear padding after validating effective request metadata.
-        if runtime is not None and exact_tokens:
-            if len(batch.input_ids) not in self.capture_num_tokens:
-                _record(self, batch, False, ("over_max_gear",))
-                return False
         allowed = original(self, batch)
         if runtime is not None:
             _record(self, batch, allowed,
@@ -136,6 +130,5 @@ def install_prefill_query_guard(*, exact_tokens=False):
         return allowed
 
     can_run._memt_query_guard = True
-    can_run._memt_exact_tokens = exact_tokens
     PrefillCudaGraphRunner.can_run_graph = can_run
     PrefillCudaGraphRunner.load_batch = load_batch
