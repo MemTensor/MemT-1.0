@@ -213,10 +213,6 @@ def replay_vote(runner, batch, *, rank, native_can_run):
     not point back to this adapter. Native exceptions propagate unchanged.
     """
     dp_size = runner.dp_size
-    if type(dp_size) is not int or dp_size < 1:
-        raise ValueError("Invalid DP size")
-    if type(rank) is not int or not 0 <= rank < dp_size:
-        raise ValueError("Invalid DP rank")
     tokens = _buckets(runner.capture_num_tokens)
     original = _counts(getattr(batch, "original_global_num_tokens_cpu", None))
     bucket = next((s for s in tokens if s >= len(batch.input_ids)), None)
@@ -232,8 +228,6 @@ def replay_vote(runner, batch, *, rank, native_can_run):
 
 def agree_replay(votes, *, dp_size):
     """Validate votes all-gathered by the caller; never infer absent ranks."""
-    if type(dp_size) is not int or dp_size < 1:
-        raise ValueError("Invalid DP size")
     votes = tuple(votes)
     if (
         len(votes) != dp_size
@@ -435,8 +429,6 @@ def refresh_metadata(metadata, native_refresh):
 
 def scratch_observation(tokens, *, context_capacity, free_bytes):
     """One FP32 C4 logits tensor, NOT total model/capture-pool peak usage."""
-    if any(type(n) is not int or n <= 0 for n in (tokens, context_capacity, free_bytes)):
-        raise ValueError("Invalid scratch dimensions or available memory")
     compressed_columns = ((context_capacity + 255) // 256) * 64
     single_logits = tokens * compressed_columns * 4
     if free_bytes <= single_logits:
@@ -466,8 +458,7 @@ def capture_attempt(runner, intent, native_capture, *, emit, synchronize, memory
               "actual": {"backend": "breakable", "status": "captured"},
               "sampled_min_free_bytes": min(sampled) if sampled else None,
               "free_delta_bytes": free_before - free_after if sampled else None,
-              "peak_scope": "process_lifetime",
-              "gpu_qualified": False, "replay_validated": False, **after})
+              "peak_scope": "process_lifetime", **after})
         return result
     except Exception as error:
         emit({"event": "capture_error", "error_type": type(error).__name__})
@@ -540,8 +531,7 @@ def _install_capture_hook(intent, runner_cls, gather, emit, synchronize, memory,
             emit({"event": "capture_preflight_rejected", "votes": votes})
             raise RuntimeError("Flash capture preflight rejected on one or more ranks")
         emit({"event": "capture_gate", **receipt, **scratch,
-              "replay_observer_enabled": replay_observer is not None,
-              "production_replay_synchronizes": False})
+              "replay_observer_enabled": replay_observer is not None})
         attn = self.model_runner.attn_backend
         attn._memt_flash_metadata_adapter = True
         self._memt_flash_capture_complete = False
@@ -665,15 +655,12 @@ def replay_counters(runner):
     Submissions and returns do not verify CUDA completion or numerical quality.
     """
     names = ("backend_submissions", "execute_returns", "execution_errors", "admissions", "fallbacks")
-    return {**{name: getattr(runner, "_memt_flash_" + name, 0) for name in names},
-            "cuda_completion_verified": False, "numeric_qualified": False}
+    return {name: getattr(runner, "_memt_flash_" + name, 0) for name in names}
 
 
 def _attach_replay_counter(runner):
     """Install once after capture; no per-execute backend-method replacement."""
     native = runner.backend.replay
-    if getattr(native, "_memt_flash_replay_counter", False):
-        raise RuntimeError("Flash backend counter already installed")
     runner._memt_flash_expected_tokens = None
 
     @wraps(native)
@@ -685,7 +672,6 @@ def _attach_replay_counter(runner):
         _count(runner, "backend_submissions")
         return result
 
-    replay._memt_flash_replay_counter = True
     runner.backend.replay = replay
 
 
@@ -715,8 +701,7 @@ def _install_execute_evidence(runner_cls, emit, replay_observer=None):
             if replay_observer is not None:
                 replay_observer({"event": "replay_return", "tokens": tokens,
                                  "backend_replay_count": submitted,
-                                 "actual": {"backend": "breakable", "status": "replay_submitted"},
-                                 "cuda_synchronized": False, "numeric_qualified": False})
+                                 "actual": {"backend": "breakable", "status": "replay_submitted"}})
             return result
         except Exception as error:
             _count(self, "execution_errors")

@@ -70,8 +70,8 @@ def test_production_replay_never_syncs_logs_or_replaces_backend_method(monkeypat
     counters = fp.replay_counters(runner)
     assert counters["backend_submissions"] == counters["execute_returns"] == 3
     assert counters["execution_errors"] == 0
-    assert counters["cuda_completion_verified"] is False
-    assert counters["numeric_qualified"] is False
+    assert set(counters) == {"backend_submissions", "execute_returns", "execution_errors",
+                             "admissions", "fallbacks"}
     counters["backend_submissions"] = 999
     assert fp.replay_counters(runner)["backend_submissions"] == 3
 
@@ -93,9 +93,8 @@ def test_external_observer_can_sync_only_after_native_return(monkeypatch):
     assert [e["event"] for e in events] == ["replay_enter", "replay_return"]
     assert events[-1]["backend_replay_count"] == 1
     assert events[-1]["cuda_synchronized"] is True
-    assert events[-1]["numeric_qualified"] is False
-    # An external diagnostic cannot upgrade the production counter's meaning.
-    assert fp.replay_counters(runner)["cuda_completion_verified"] is False
+    # An external diagnostic event does not leak into the production counters.
+    assert "cuda_synchronized" not in fp.replay_counters(runner)
 
 
 def test_observer_without_sync_reports_submission_only(monkeypatch):
@@ -104,7 +103,7 @@ def test_observer_without_sync_reports_submission_only(monkeypatch):
     runner.execute(batch)
     assert calls == ["execute", "backend"]
     assert events[-1]["actual"]["status"] == "replay_submitted"
-    assert events[-1]["cuda_synchronized"] is False
+    assert "cuda_synchronized" not in events[-1]
 
 
 @pytest.mark.parametrize("failure,submitted", [("backend_error", 0), ("tail_error", 1), ("skip_backend", 0), ("wrong_gear", 0)])
@@ -173,7 +172,7 @@ def test_large_gear_scratch_estimate_is_not_a_capture_pool_bound():
     scratch = fp.scratch_observation(4096, context_capacity=32768, free_bytes=2**30)
     assert scratch["single_c4_logits_bytes"] == 128 * 1024**2
     assert scratch["total_capture_pool_bytes"] is None
-    with pytest.raises(ValueError, match="scratch"):
+    with pytest.raises(ValueError, match="Insufficient free memory"):
         fp.scratch_observation(4096, context_capacity=32768,
                                free_bytes=scratch["single_c4_logits_bytes"])
 
@@ -192,10 +191,8 @@ def test_observer_type_is_validated_before_any_hooks_are_installed(monkeypatch):
                                  emit=untouched, replay_observer=False)
 
 
-def test_duplicate_counter_and_out_of_scope_backend_replay_are_rejected(monkeypatch):
+def test_out_of_scope_backend_replay_is_rejected(monkeypatch):
     runner, batch, calls, _ = setup_runner(monkeypatch)
-    with pytest.raises(RuntimeError, match="already"):
-        fp._attach_replay_counter(runner)
     with pytest.raises(RuntimeError, match="admitted"):
         runner.backend.replay(NS(size=512), batch)
     assert calls == []

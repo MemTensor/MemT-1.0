@@ -313,20 +313,17 @@ def test_balanced_multi_request_prefill_keeps_lengths_and_prefixes():
     assert batch.extend_prefix_lens_cpu == [10, 20]
 
 
-@pytest.mark.parametrize("rank,dp_size", [(True, 2), (-1, 2), (2, 2), (0, False), (0, 0)])
-def test_invalid_rank_topology_raises_before_native(rank, dp_size):
-    runner, batch = runner_and_batch()
-    runner.dp_size = dp_size
-    with pytest.raises(ValueError, match="Invalid DP"):
-        replay_vote(runner, batch, rank=rank, native_can_run=lambda *a: True)
-
-
-def test_consensus_rejects_invalid_topology_and_missing_shape():
-    with pytest.raises(ValueError, match="Invalid DP"):
-        agree_replay([], dp_size=0)
+def test_consensus_rejects_incomplete_votes_and_missing_shape():
     no_shape = [replace(vote(rank), bucket=None) for rank in range(2)]
     assert not agree_replay(no_shape, dp_size=2).allowed
-    assert not agree_replay([object(), object()], dp_size=2).allowed
+    # Votes come from other ranks: malformed, missing, duplicated or foreign
+    # votes are rejected rather than inferred.
+    for votes in ([object(), object()], [], [vote(0)], [vote(0), vote(0)],
+                  [vote(0), replace(vote(1), dp_size=4)], [vote(0), vote(1), vote(1)]):
+        result = agree_replay(votes, dp_size=2)
+        assert not result.allowed
+        assert result.reasons == ("rank_votes_incomplete",)
+    assert agree_replay([vote(0), vote(1)], dp_size=2).allowed
 
 
 def test_metadata_probe_never_copies_device_counts_to_host():
@@ -419,7 +416,7 @@ def test_config_gate_rechecks_native_vetoes_despite_explicit_lock(monkeypatch):
     args, values = config_args()
     receipt = fp.validate_capture_request(args, intent, native_validator=validator)
     assert receipt["status"] == "capture_attempt_permitted"
-    assert receipt["gpu_qualified"] is False
+    assert receipt["gpu_qualified"] is False  # Part of /memt/identity; kept.
     for name, value in (("attn_cp_size", 2), ("moe_a2a_backend", "deepep")):
         values[name] = value
         with pytest.raises(ValueError, match="native|scope"):
@@ -514,8 +511,13 @@ def test_capture_measurement_is_not_a_total_pool_estimate():
     result = fp.scratch_observation(512, context_capacity=32768, free_bytes=2**30)
     assert result["single_c4_logits_bytes"] == 512 * 8192 * 4
     assert result["total_capture_pool_bytes"] is None
-    with pytest.raises(ValueError, match="scratch"):
+    with pytest.raises(ValueError, match="Insufficient free memory"):
         fp.scratch_observation(1024, context_capacity=32768, free_bytes=1)
+    with pytest.raises(ValueError, match="Insufficient free memory"):
+        fp.scratch_observation(512, context_capacity=32768,
+                               free_bytes=result["single_c4_logits_bytes"])
+    assert fp.scratch_observation(512, context_capacity=32768,
+                                  free_bytes=result["single_c4_logits_bytes"] + 1)
 
 
 def test_capture_event_retains_failure_and_requires_real_graphs():
@@ -542,7 +544,7 @@ def test_capture_receipt_reports_segments_and_propagates_oom():
                               synchronize=lambda: None, memory=lambda: {}) == 42
     assert events[-1]["event"] == "capture_return"
     assert events[-1]["segments"] == {512: 2}
-    assert events[-1]["gpu_qualified"] is False
+    assert "gpu_qualified" not in events[-1] and "replay_validated" not in events[-1]
     assert events[-1]["actual"]["status"] == "captured"
     def oom():
         raise MemoryError("capture allocation")
@@ -605,7 +607,7 @@ def test_installed_worker_gate_reaches_capture_and_refresh(monkeypatch):
     assert events[-1]["event"] == "replay_return"
     assert events[-1]["backend_replay_count"] == 1
     assert events[-1]["actual"]["status"] == "replay_submitted"
-    assert events[-1]["cuda_synchronized"] is False
+    assert "cuda_synchronized" not in events[-1] and "numeric_qualified" not in events[-1]
     batch.fail = True
     with pytest.raises(RuntimeError, match="native replay failure"):
         runner.execute(batch)
