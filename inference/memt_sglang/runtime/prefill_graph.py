@@ -9,12 +9,9 @@ from .decode_graph import query_graph_allowed
 def _record(runner, batch, admitted, reasons):
     """Zero-cost label for one admission decision; never changes the outcome.
 
-    Flash installs both this guard and the DP prefill consensus, which records
-    the same decision with authoritative reasons. Skip here so one decision is
-    counted once; the consensus sets `_memt_flash_prefill_allowed` first.
+    Flash batches never reach here: can_run defers them to the DP vote, which
+    records the decision itself.
     """
-    if hasattr(batch, "_memt_flash_prefill_allowed"):
-        return
     tokens = len(batch.input_ids)
     gear = None
     if admitted:
@@ -89,6 +86,13 @@ def install_prefill_query_guard():
     @wraps(original_load)
     def load_batch(self, batch, *args, **kwargs):
         runtime = getattr(self.model_runner.model, "memt_runtime", None)
+        if hasattr(batch, "_memt_flash_prefill_allowed"):
+            # Flash: the DP vote already validated every rank's spans, and
+            # MAX_LEN rows (shorter or idle ranks) are not live tokens. Native
+            # load_batch keeps the live extend spans; only RIDs are missing.
+            static = original_load(self, batch, *args, **kwargs)
+            static.rids = list(batch.rids or [])
+            return static
         valid = live_prefill_tokens(batch) if runtime is not None else None
         static = original_load(self, batch, *args, **kwargs)
         # Native body capture carries token/length metadata, but omits RIDs.
@@ -113,6 +117,11 @@ def install_prefill_query_guard():
 
     @wraps(original)
     def can_run(self, batch):
+        if hasattr(batch, "_memt_flash_prefill_allowed"):
+            # Flash decided cluster-wide in its DP vote. A per-rank veto here
+            # (e.g. live-span checks failing on MAX_LEN rows) would split ranks
+            # between replay and eager and hang the in-graph collectives.
+            return original(self, batch)
         runtime = getattr(self.model_runner.model, "memt_runtime", None)
         if runtime is not None and not query_graph_allowed(runtime, batch, "prefill"):
             _record(self, batch, False, ("memt_query_veto",))
