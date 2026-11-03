@@ -178,13 +178,23 @@ def install_dp_query_consensus():
                 for r in records
             )
             allowed = allowed and getattr(batch, "_memt_graph_override", True)
-            vote = torch.tensor([int(allowed)], dtype=torch.int32)
+            mode = batch.forward_mode
+            # The same MIN-reduce carries "any rank decodes" and "any rank
+            # extends" as negated flags, so the Flash prefill gate can tell a
+            # mixed prefill/decode round before native MAX_LEN normalization
+            # without adding a collective.
+            vote = torch.tensor(
+                [int(allowed), -int(mode.is_decode()), -int(mode.is_extend())],
+                dtype=torch.int32,
+            )
             torch.distributed.all_reduce(
                 vote,
                 op=torch.distributed.ReduceOp.MIN,
                 group=get_world_group().cpu_group,
             )
-            batch._memt_graph_allowed = bool(vote.item())
+            allowed_all, any_decode, any_extend = vote.tolist()
+            batch._memt_graph_allowed = bool(allowed_all)
+            batch._memt_dp_phase_mixed = bool(any_decode and any_extend)
         return native(self, batch, *args, **kwargs)
 
     forward._memt_dp_graph_consensus = True

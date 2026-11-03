@@ -20,12 +20,16 @@ The launcher defaults to 512/1024; 4096 requires an explicit gear request and
 independent headroom, capture, replay and numerical checks, including any decode
 graphs used alongside it. No default benefit or CUDA qualification is implied.
 The native installation is not edited.
-The pinned runner copies global_dp_buffer_len
-from the live batch while bucket-padding input_ids (load_batch:925,1030).
-Until that contract is adapted, only equal, unpadded DP token shapes qualify
-for a local replay vote. Original counts are required: ForwardBatch MAX_LEN
-padding can turn an idle rank into a dummy EXTEND (1277-1324), hiding zero
-counts from the native runner's inactive-rank check (589-598).
+Padding: native MAX_LEN pads every rank to the global maximum
+token count and load_batch pads that to the smallest captured gear, so all
+ranks already run the same bucket. The pinned runner, however, keeps the
+max-length DP metadata (global_num_tokens_*, global_dp_buffer_len) on the
+static batch. Captured segments read their capture-time copies, but eager
+break points between them read the static batch and the DP buffer class
+state, so replay rewrites both to the bucket. A rank's own token count may be
+anything up to the maximum, and an idle rank runs native's dummy request.
+Original counts are still required: MAX_LEN turns an idle rank into a dummy
+EXTEND, hiding zero counts from the native inactive-rank check.
 
 Native keeps capture metadata and graph pool addresses alive. Replay repairs
 the core/indexer page-table alias. Total capture-pool peak and numeric quality
@@ -137,6 +141,26 @@ class ReplayAgreement:
     reasons: tuple[str, ...]
 
 
+def _replay_gear(max_tokens, gears):
+    """Smallest captured gear for the global maximum, or None if R2 rejects it.
+
+    Mirrors native can_run_graph: above the largest gear, or padded beyond the
+    2x factor, falls back to eager. Every rank evaluates the same all-gathered
+    maximum, so the answer is identical cluster-wide.
+    """
+    if max_tokens <= 0:
+        return None
+    gear = next((size for size in gears if size >= max_tokens), None)
+    if gear is None or gear > max_tokens * _PADDING_FACTOR:
+        return None
+    return gear
+
+
+# Native _MAX_PREFILL_CUDA_GRAPH_PADDING_FACTOR; re-checked here only to keep
+# eager fallback on native eager shapes before MAX_LEN normalization.
+_PADDING_FACTOR = 2
+
+
 def _protocol_reasons(runner, batch):
     backend = runner.model_runner.attn_backend
     runtime = getattr(runner.model_runner.model, "memt_runtime", None)
@@ -146,16 +170,15 @@ def _protocol_reasons(runner, batch):
     )
     if runtime is None:
         return ("memt_query_veto",)
-    # Under DP attention a rank can be decoding while another rank prefills.
-    # It still votes on the prefill graph; label it as the mixed-phase case
-    # rather than as a non-query request. Only the label differs:
-    # any reason vetoes replay.
-    if batch.forward_mode.is_decode():
+    # MAX_LEN normalization rewrites idle and decode ranks into EXTEND and keeps
+    # the real mode in _original_forward_mode; judge the real mode. A rank
+    # decoding while another rank prefills is the mixed-phase case.
+    original_mode = getattr(batch, "_original_forward_mode", None) or batch.forward_mode
+    if original_mode.is_decode():
         return ("dp_phase_mixed",)
     if not query_graph_allowed(runtime, batch, "prefill"):
         return ("memt_query_veto",)
-    original_mode = getattr(batch, "_original_forward_mode", None)
-    if original_mode is not None and not original_mode.is_extend():
+    if not (original_mode.is_extend() or original_mode.is_idle()):
         return ("original_mode_not_extend",)
     if (
         runner.prefill_backend_name != "breakable"
@@ -169,27 +192,46 @@ def _protocol_reasons(runner, batch):
     return ()
 
 
-def _batch_reasons(batch, counts, rank, dp_size, bucket):
+def _batch_reasons(batch, counts, rank, dp_size):
+    """Check that this rank holds native's MAX_LEN layout for the shared maximum.
+
+    Every rank must be padded to the same maximum; its own live spans may be
+    shorter, and an idle rank must be native's single dummy request.
+    """
     if len(counts) != dp_size:
         return ("original_dp_counts_missing",)
-    if not all(counts):
+    max_tokens = max(counts)
+    if max_tokens == 0:
         return ("original_dp_idle",)
-    if len(set(counts)) != 1:
-        return ("original_dp_uneven",)
     effective = _counts(getattr(batch, "global_num_tokens_cpu", None))
-    n = len(batch.input_ids)
-    if effective != counts or n != counts[rank]:
+    if effective != (max_tokens,) * dp_size or len(batch.input_ids) != max_tokens:
         return ("dp_token_counts_inconsistent",)
     padding_mode = getattr(batch, "dp_padding_mode", None)
     if padding_mode is None or not padding_mode.is_max_len():
         return ("dp_max_len_required",)
-    if getattr(batch, "global_dp_buffer_len", None) != n * dp_size:
+    if getattr(batch, "global_dp_buffer_len", None) != max_tokens * dp_size:
         return ("dp_collective_buffer_mismatch",)
     if not getattr(batch, "can_run_dp_breakable_cuda_graph", False):
         return ("native_dp_veto",)
     lengths = _counts(getattr(batch, "extend_seq_lens_cpu", None))
     prefixes = _counts(getattr(batch, "extend_prefix_lens_cpu", None))
     bs = batch.batch_size
+    original_mode = getattr(batch, "_original_forward_mode", None)
+    was_idle = original_mode is not None and original_mode.is_idle()
+    if counts[rank] == 0:
+        # Native fabricates one request covering the padded rows.
+        if (
+            not was_idle
+            or batch.rids
+            or bs != 1
+            or lengths != (max_tokens,)
+            or prefixes != (0,)
+        ):
+            return ("idle_rank_dummy_inconsistent",)
+        return ()
+    if was_idle:
+        # A rank with real tokens cannot have been idle before normalization.
+        return ("idle_rank_dummy_inconsistent",)
     if (
         len(lengths) != bs
         or len(prefixes) != bs
@@ -199,8 +241,26 @@ def _batch_reasons(batch, counts, rank, dp_size, bucket):
         or getattr(batch, "num_token_non_padded_cpu", None) != counts[rank]
     ):
         return ("request_token_spans_inconsistent",)
-    if bucket != n:
-        return ("dp_bucket_padding_unverified",)
+    return ()
+
+
+def _fallback_class(batch, counts, gears):
+    """Fallback cause for rounds _preserve_eager_padding already sent to eager.
+
+    Those rounds stay in native SUM_LEN layout, so the layout checks below
+    would only report the mechanism (dp_max_len_required), not the cause.
+    """
+    if getattr(batch, "_memt_dp_phase_mixed", False):
+        return ("dp_phase_mixed",)
+    if not getattr(batch, "_memt_graph_allowed", True):
+        return ("memt_query_veto",)
+    if not counts or not gears:
+        return ()
+    max_tokens = max(counts)
+    if max_tokens > max(gears):
+        return ("over_max_gear",)
+    if max_tokens > 0 and _replay_gear(max_tokens, gears) is None:
+        return ("below_padding_factor",)
     return ()
 
 
@@ -217,10 +277,14 @@ def replay_vote(runner, batch, *, rank, native_can_run):
     original = _counts(getattr(batch, "original_global_num_tokens_cpu", None))
     bucket = next((s for s in tokens if s >= len(batch.input_ids)), None)
     reasons = _protocol_reasons(runner, batch)
-    if not tokens or bucket is None:
+    if not tokens:
         reasons += ("capture_shape_unavailable",)
+    elif bucket is None:
+        reasons += ("over_max_gear",)  # above the largest gear
     if not reasons:
-        reasons = _batch_reasons(batch, original, rank, dp_size, bucket)
+        reasons = _fallback_class(batch, original, tokens) or _batch_reasons(
+            batch, original, rank, dp_size
+        )
     if not reasons and not native_can_run(runner, batch):
         reasons = ("native_veto",)
     return ReplayVote(rank, dp_size, tokens, original, bucket, reasons)
@@ -569,10 +633,21 @@ def _preserve_eager_padding(model_runner, batch, intent):
     effective = _counts(getattr(batch, "global_num_tokens_cpu", None))
     # Native prepare_mlp_sync_batch forces MAX_LEN before the replay vote.
     # Rejecting later would retain padded dummy rows and changed GEMM/collective
-    # shapes even though the batch executes eagerly. These counts are already
-    # shared by every DP rank; no local eligibility or new collective belongs here.
-    if (len(counts) != intent.dp_size or len(set(counts)) != 1
-            or counts[0] not in intent.capture_tokens or effective != counts):
+    # shapes even though the batch executes eagerly, so predictable fallbacks
+    # are vetoed here and keep native SUM_LEN eager shapes. The counts and the
+    # mixed-phase flag are already shared by every DP rank; no local
+    # eligibility or new collective belongs here.
+    if (
+        len(counts) != intent.dp_size
+        or effective != counts
+        # The MemT world vote ran before normalization: a commit (or any
+        # non-query) on some rank, or a mixed prefill/decode round, will run
+        # eagerly, so it must keep native SUM_LEN shapes rather than MAX_LEN
+        # dummy rows that change the committed rank's MoE workload.
+        or not getattr(batch, "_memt_graph_allowed", True)
+        or getattr(batch, "_memt_dp_phase_mixed", False)
+        or _replay_gear(max(counts), intent.capture_tokens) is None
+    ):
         batch.can_run_dp_breakable_cuda_graph = False
 
 
@@ -614,6 +689,7 @@ def _install_replay_consensus(intent, runner_cls, model_runner_cls, gather, rank
             getattr(batch, "_memt_graph_allowed", True) and agreement.allowed
         )
         batch._memt_flash_prefill_allowed = agreement.allowed
+        batch._memt_flash_bucket = agreement.bucket if agreement.allowed else None
         _count(runner, "admissions" if agreement.allowed else "fallbacks")
         # Idle ranks vote but run no prefill tokens; count each decision on the
         # ranks that actually prefilled so buckets reflect real token counts.
@@ -668,11 +744,41 @@ def _attach_replay_counter(runner):
         expected = runner._memt_flash_expected_tokens
         if expected is None or shape_key.size != expected:
             raise RuntimeError("Flash backend replay does not match admitted execution")
+        _use_bucket_dp_layout(runner, static_forward_batch, expected)
         result = native(shape_key, static_forward_batch, **kwargs)
         _count(runner, "backend_submissions")
         return result
 
     runner.backend.replay = replay
+
+
+def _use_bucket_dp_layout(runner, static_batch, bucket):
+    """Present the captured DP geometry (bucket rows per rank) to replay.
+
+    Captured segments already hold their capture-time DP tensors; this aligns
+    the static batch and the DP buffer class state that eager break points read.
+    global_num_tokens_for_logprob_* stay live: the eager logits tail gathers one
+    row per request from them, independent of padding.
+    """
+    from sglang.srt.layers.dp_attention import set_dp_buffer_len
+
+    dp_size = runner.dp_size
+    cache = runner.__dict__.setdefault("_memt_flash_dp_tokens", {})
+    tokens_gpu = cache.get(bucket)
+    if tokens_gpu is None:
+        device = static_batch.global_num_tokens_gpu.device
+        tokens_gpu = cache[bucket] = _bucket_tensor(bucket, dp_size, device)
+    static_batch.global_num_tokens_cpu = [bucket] * dp_size
+    static_batch.global_num_tokens_gpu = tokens_gpu
+    static_batch.global_dp_buffer_len = bucket * dp_size
+    static_batch.dp_local_start_pos = static_batch.dp_local_num_tokens = None
+    set_dp_buffer_len(bucket * dp_size, bucket, True, [bucket] * dp_size)
+
+
+def _bucket_tensor(bucket, dp_size, device):
+    import torch
+
+    return torch.full((dp_size,), bucket, dtype=torch.int32, device=device)
 
 
 def _install_execute_evidence(runner_cls, emit, replay_observer=None):
@@ -687,7 +793,9 @@ def _install_execute_evidence(runner_cls, emit, replay_observer=None):
             raise RuntimeError("Flash replay lacks capture/admission evidence")
         if self._memt_flash_expected_tokens is not None:
             raise RuntimeError("Flash replay cannot be reentered")
-        tokens = len(batch.input_ids)
+        tokens = getattr(batch, "_memt_flash_bucket", None)
+        if tokens is None:
+            raise RuntimeError("Flash replay lacks the agreed bucket")
         before = getattr(self, "_memt_flash_backend_submissions", 0)
         self._memt_flash_expected_tokens = tokens
         try:
