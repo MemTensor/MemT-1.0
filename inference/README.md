@@ -117,7 +117,7 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank, the validated minimum. A query longer than the budget is split, and a split query is not bitwise equal to an unsplit one at any budget. Default `0`. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release a coalesced batch at this many requests / input tokens; defaults 4 / 4096. |
 
