@@ -112,7 +112,15 @@ class SessionService:
         return state
 
     async def _recover(self, state, session):
-        result = await self._call(state, "fence", session)
+        try:
+            result = await self._call(state, "fence", session)
+        except SessionError:
+            # The worker does not know this session, so the lost reply belonged
+            # to a create that never took effect or to a close that did. Either
+            # way there is nothing left to fence, and keeping the tokenizer
+            # entry would reserve a session slot that no worker holds.
+            del self.sessions[session]
+            raise
         if result["status"] == TransactionStatus.OPEN:
             result = await self._call(
                 state, "abort", session, transaction=result["transaction"]
@@ -165,7 +173,7 @@ class SessionService:
         state = self._owned(
             session,
             payload.get("lease"),
-            recovery=action in {"recover", "status", "release"},
+            recovery=action in {"recover", "status", "release", "close"},
         )
         state.busy = True
         try:

@@ -96,8 +96,11 @@ def _flash_prefill_config(rest, graph):
 
 
 def _unobserved_flash_actual():
-    return {"status": "not_observed", "backend": None,
-            "evidence": "worker capture events; replay_counters(runner); optional replay_observer"}
+    return {
+        "status": "not_observed",
+        "backend": None,
+        "evidence": "worker capture events; replay_counters(runner); optional replay_observer",
+    }
 
 
 def prepare(argv):
@@ -107,6 +110,11 @@ def prepare(argv):
         "PREFILL_GRAPH",
         "DECODE_GRAPH",
         "QUERY_CHUNKS",
+        "NANO_COMPILE",
+        "COMMIT_PLAN_CACHE",
+        "MEMORY_DECODE_GRAPH",
+        "PADDED_DECODE_QUERY",
+        "REQUIRE_NATIVE_KV_CAPACITY",
     ):
         enabled(feature)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -121,6 +129,11 @@ def prepare(argv):
     parser.add_argument("--config", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--control-timeout-seconds",
+        type=float,
+        help="Tokenizer/worker control timeout (default 180 seconds)",
+    )
+    parser.add_argument(
         "--deterministic-communication",
         action="store_true",
         help="Use NCCL Tree AllReduce, disable custom/fused collectives; not batch-invariant inference",
@@ -129,6 +142,13 @@ def prepare(argv):
         "--state-directory", help="Server-owned memory snapshot directory"
     )
     options, rest = parser.parse_known_args(argv)
+    from memt_sglang.runtime.config import control_timeout_seconds
+
+    if options.control_timeout_seconds is not None:
+        os.environ["MEMT_CONTROL_TIMEOUT_SECONDS"] = str(
+            options.control_timeout_seconds
+        )
+    timeout = control_timeout_seconds()
     path = Path(options.model_path).expanduser().resolve()
     raw = (path / "config.json").read_bytes()
     config = json.loads(raw)
@@ -145,7 +165,9 @@ def prepare(argv):
         config, json.loads(options.json_model_override_args), capacity_overrides
     )
     graph = {
-        phase: {"backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"}
+        phase: {
+            "backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"
+        }
         for phase in ("prefill", "decode")
     }
     options.flash_prefill_intent = None
@@ -174,6 +196,7 @@ def prepare(argv):
         engine.append("--enforce-disable-flashinfer-allreduce-fusion")
     identity = {
         "schema_version": 1,
+        "control_timeout_seconds": timeout,
         "model": model,
         "chunk_tokens": memory_config.chunk_tokens,
         "sglang_version": SGLANG_VERSION,
@@ -196,8 +219,10 @@ def prepare(argv):
         identity["flash_prefill"] = {
             "requested_backend": intent.requested_backend,
             "requested_capture_tokens": list(intent.capture_tokens),
-            "resolved_backend": None, "resolved_capture_tokens": None,
-            "status": "not_resolved", "gpu_qualified": False,
+            "resolved_backend": None,
+            "resolved_capture_tokens": None,
+            "status": "not_resolved",
+            "gpu_qualified": False,
             "actual": _unobserved_flash_actual(),
         }
     if options.deterministic_communication:
@@ -258,21 +283,40 @@ def resolve_flash_prefill(options, args, identity):
     receipt = prefill_identity(intent, phase)
     if phase.backend != "disabled":
         if intent.requested_backend != "breakable":
-            raise ValueError("Flash prefill resolved enabled without an explicit request")
+            raise ValueError(
+                "Flash prefill resolved enabled without an explicit request"
+            )
         receipt = validate_capture_request(args, intent)
-        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps({
-            "requested_backend": intent.requested_backend,
-            "capture_tokens": list(intent.capture_tokens), "dp_size": intent.dp_size,
-        })
-    return {**identity, "flash_prefill": {
-        **receipt, "resolved_dp_size": args.dp_size, "actual": _unobserved_flash_actual(),
-    }}
+        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps(
+            {
+                "requested_backend": intent.requested_backend,
+                "capture_tokens": list(intent.capture_tokens),
+                "dp_size": intent.dp_size,
+            }
+        )
+    return {
+        **identity,
+        "flash_prefill": {
+            **receipt,
+            "resolved_dp_size": args.dp_size,
+            "actual": _unobserved_flash_actual(),
+        },
+    }
 
 
 def emit_flash_prefill_event(event):
     """Worker stdout evidence, separate from the parent's unresolved actual state."""
-    print(json.dumps({**event, "component": "memt_flash_prefill", "pid": os.getpid(),
-                      "gpu_qualified": False}), flush=True)
+    print(
+        json.dumps(
+            {
+                **event,
+                "component": "memt_flash_prefill",
+                "pid": os.getpid(),
+                "gpu_qualified": False,
+            }
+        ),
+        flush=True,
+    )
 
 
 def emit_graph_stats(event):
@@ -317,7 +361,9 @@ def bootstrap(*, worker=True, replay_observer=None):
         from memt_sglang.runtime import graph_stats
 
         graph_stats.install_exit_summary(
-            model=model, rank=_worker_dp_rank, emit=emit_graph_stats,
+            model=model,
+            rank=_worker_dp_rank,
+            emit=emit_graph_stats,
         )
     request = os.environ.get("MEMT_FLASH_PREFILL_REQUEST")
     if worker and model == "memt-flash" and request:
@@ -327,10 +373,14 @@ def bootstrap(*, worker=True, replay_observer=None):
         )
 
         payload = json.loads(request)
-        intent = FlashPrefillIntent(payload["requested_backend"],
-                                    tuple(payload["capture_tokens"]), payload["dp_size"])
-        install_native_worker(intent, emit=emit_flash_prefill_event,
-                              replay_observer=replay_observer)
+        intent = FlashPrefillIntent(
+            payload["requested_backend"],
+            tuple(payload["capture_tokens"]),
+            payload["dp_size"],
+        )
+        install_native_worker(
+            intent, emit=emit_flash_prefill_event, replay_observer=replay_observer
+        )
 
 
 def run_scheduler(*args, **kwargs):
@@ -359,6 +409,12 @@ def init_tokenizer(*args, **kwargs):
 
     install_tokenizer_control(result[0])
     return result
+
+
+def resolve_mhc_prewarm(args, model):
+    """Pinned native warmup allocates the resolved chunk budget as a shape."""
+    if model == "memt-flash" and args.chunked_prefill_size == -1:
+        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
 
 
 def main(argv=None):
@@ -394,6 +450,7 @@ def main(argv=None):
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
+    resolve_mhc_prewarm(args, identity["model"])
     sync_graph_config(args)
     validate_server_args(
         args,

@@ -185,6 +185,13 @@ class WorkerSessions:
         }
 
     def reset(self, session, *, close=False):
+        if close and session not in self.pool.sessions:
+            # A close whose acknowledgement was lost is retried against a worker
+            # that already applied it. Repeating the request must reach the same
+            # state, not raise: the tokenizer cannot distinguish "never applied"
+            # from "applied, reply dropped", and refusing here left the session
+            # unrecoverable and its slot reserved for the process lifetime.
+            return
         self.require(session)
         self.fence(session)
         if session in self.transactions:
