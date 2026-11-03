@@ -211,14 +211,40 @@ class MemoryRequestMiddleware:
                 if not message.get("more_body", False):
                     decoder.finish()
                     complete = True
+                    ended.set()
 
+        # SGLang's background abort sleeps after the final body. Wait for the
+        # body, then fence its RID; observe the unrelated background tail later.
+        ended = asyncio.Event()
+        native = asyncio.create_task(self.app(scope, receive, capture))
         try:
-            await self.app(scope, receive, capture)
+            waiter = asyncio.create_task(ended.wait())
+            try:
+                await asyncio.wait(
+                    {native, waiter}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                waiter.cancel()
+            if native.done():
+                native.result()
             if not complete or not done or terminal is None:
                 raise ValueError("Incomplete native stream")
         except Exception as error:
             failure = error
+        except BaseException:
+            # Unwind native generation before fencing an interrupted request.
+            native.cancel()
+            await asyncio.wait({native})
+            raise
         finally:
+            if native.done():
+                if not native.cancelled():
+                    native.exception()
+            else:
+                self._cleanup_tasks.add(native)
+                native.add_done_callback(
+                    partial(self._native_done, internal_id=internal.rid)
+                )
             try:
                 await self._finish(
                     request,
@@ -289,6 +315,18 @@ class MemoryRequestMiddleware:
                 "Memory cleanup failed: session=%s request_id=%s internal_id=%s",
                 session,
                 request_id,
+                internal_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _native_done(self, task, *, internal_id):
+        self._cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning(
+                "Native stream tail failed after completion: internal_id=%s",
                 internal_id,
                 exc_info=(type(error), error, error.__traceback__),
             )

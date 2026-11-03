@@ -1,4 +1,4 @@
-"""Launch the pinned eager HTTP server; --dry-run is CPU-only."""
+"""Launch the pinned HTTP server with explicit graph opt-ins; dry-run is CPU-only."""
 
 import argparse
 import hashlib
@@ -10,14 +10,105 @@ from pathlib import Path
 
 from memt_sglang import SGLANG_REFERENCE_COMMIT, SGLANG_VERSION, require_sglang
 from memt_sglang._vendor.fla import __version__ as FLA_VERSION
+from memt_sglang.runtime.features import (
+    enabled,
+    execution_identity,
+    overlap_phases,
+    sync_graph_config,
+)
 from memt_sglang.validation import (
     validate_model_config,
     validate_runtime_config,
     validate_server_args,
 )
 
+_DP_FLAGS = ("--dp-size", "--data-parallel-size")
+
+
+def _requested_dp_size(argv):
+    """Read the DP size from argv before native parsing.
+
+    FlashPrefillIntent must exist before SGLang resolves arguments, but the
+    replay consensus gathers one vote per DP rank, so the intent needs the real
+    size. Only the canonical flag and its documented alias are parsed here;
+    resolve_flash_prefill() cross-checks the result against args.dp_size, which
+    is what native actually resolved (including abbreviations and config
+    merging). Returns None when the flag is absent.
+    """
+    found = None
+    for index, value in enumerate(argv):
+        flag, separator, inline = value.partition("=")
+        if flag not in _DP_FLAGS:
+            continue
+        if separator:
+            raw = inline
+        elif index + 1 < len(argv):
+            raw = argv[index + 1]
+        else:
+            raise ValueError(f"{flag} requires a value")
+        try:
+            parsed = int(raw)
+        except ValueError:
+            raise ValueError(f"{flag} must be an integer, got {raw!r}") from None
+        if found is not None and found != parsed:
+            raise ValueError(f"Conflicting DP size flags: {found} and {parsed}")
+        found = parsed
+    return found
+
+
+def _flash_prefill_config(rest, graph):
+    """Normalize an explicit Flash request before native resolution can change it."""
+    from memt_sglang.runtime.flash_prefill import (
+        FlashPrefillIntent,
+        explicit_capture_config,
+    )
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--cuda-graph-config")
+    if sum(v.split("=", 1)[0] == "--cuda-graph-config" for v in rest) > 1:
+        raise ValueError("Duplicate Flash cuda-graph-config")
+    parsed, remaining = parser.parse_known_args(rest)
+    override = json.loads(parsed.cuda_graph_config) if parsed.cuda_graph_config else {}
+    if not isinstance(override, dict):
+        raise ValueError("Flash cuda-graph-config must be an object")
+    graph = {**graph, **override}
+    phase = graph["prefill"]
+    if not isinstance(phase, dict):
+        raise ValueError("Flash prefill config must be an object")
+    backend = phase.get("backend", "disabled")
+    tokens = phase.get("bs", [512, 1024]) if backend == "breakable" else []
+    if not isinstance(tokens, list):
+        raise ValueError("Flash prefill bs must be a list")
+    dp_size = _requested_dp_size(rest)
+    if dp_size is None:
+        if backend == "breakable":
+            raise ValueError(
+                "Flash prefill graph requires an explicit --dp-size (attention TP1)"
+            )
+        dp_size = 1
+    intent = FlashPrefillIntent(backend, tuple(tokens), dp_size)
+    if backend == "breakable":
+        bounded = explicit_capture_config(intent)
+        if "max_bs" in phase and phase["max_bs"] != bounded["max_bs"]:
+            raise ValueError("Flash prefill max_bs must match requested bs")
+        graph = {**graph, "prefill": {**phase, **bounded}}
+    return remaining, graph, intent
+
+
+def _unobserved_flash_actual():
+    return {"status": "not_observed", "backend": None,
+            "evidence": "worker capture events; replay_counters(runner); optional replay_observer"}
+
 
 def prepare(argv):
+    for feature in (
+        "METADATA_CACHE",
+        "SLOT_READ",
+        "PREFILL_GRAPH",
+        "DECODE_GRAPH",
+        "QUERY_CHUNKS",
+    ):
+        enabled(feature)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--model-path", required=True)
     for name in (
@@ -53,6 +144,13 @@ def prepare(argv):
     runtime = validate_runtime_config(
         config, json.loads(options.json_model_override_args), capacity_overrides
     )
+    graph = {
+        phase: {"backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"}
+        for phase in ("prefill", "decode")
+    }
+    options.flash_prefill_intent = None
+    if model == "memt-flash":
+        rest, graph, options.flash_prefill_intent = _flash_prefill_config(rest, graph)
     engine = [
         "--model-path",
         str(path),
@@ -61,9 +159,9 @@ def prepare(argv):
         "--chunked-prefill-size",
         "-1",
         "--disable-radix-cache",
-        "--disable-overlap-schedule",
+        *([] if any(overlap_phases()) else ["--disable-overlap-schedule"]),
         "--cuda-graph-config",
-        json.dumps({phase: {"backend": "disabled"} for phase in ("prefill", "decode")}),
+        json.dumps(graph),
         "--json-model-override-args",
         json.dumps({"memt_runtime": runtime}),
         *rest,
@@ -85,8 +183,23 @@ def prepare(argv):
         "memt_checkpoint_id": config.get("memt_checkpoint_id"),
         "memt_runtime": runtime,
         "fla_version": FLA_VERSION,
-        "mode": "eager",
+        "mode": "opt-in"
+        if any(
+            enabled(n)
+            for n in ("PREFILL_GRAPH", "DECODE_GRAPH", "SLOT_READ", "QUERY_CHUNKS")
+        )
+        or any(overlap_phases())
+        else "eager",
     }
+    if options.flash_prefill_intent is not None:
+        intent = options.flash_prefill_intent
+        identity["flash_prefill"] = {
+            "requested_backend": intent.requested_backend,
+            "requested_capture_tokens": list(intent.capture_tokens),
+            "resolved_backend": None, "resolved_capture_tokens": None,
+            "status": "not_resolved", "gpu_qualified": False,
+            "actual": _unobserved_flash_actual(),
+        }
     if options.deterministic_communication:
         identity["communication"] = {
             "NCCL_ALGO": "allreduce:tree",
@@ -118,7 +231,73 @@ def redacted_argv(argv):
     return result
 
 
-def bootstrap():
+def resolve_flash_prefill(options, args, identity):
+    """Validate before publishing the explicit request to spawned workers."""
+    from dataclasses import replace
+
+    from memt_sglang.runtime.flash_prefill import (
+        prefill_identity,
+        validate_capture_request,
+    )
+
+    os.environ.pop("MEMT_FLASH_PREFILL_REQUEST", None)
+    intent = options.flash_prefill_intent
+    if intent is None:
+        return identity
+    if intent.requested_backend == "breakable":
+        # The pre-parse intent carries the DP size from argv; native is the
+        # authority. A mismatch means an unparsed form (abbreviation, merged
+        # config) reached SGLang, and the replay vote count would be wrong.
+        if getattr(args, "dp_size", None) != intent.dp_size:
+            raise ValueError(
+                "Flash prefill DP size differs from the resolved argument: "
+                f"requested {intent.dp_size}, resolved {getattr(args, 'dp_size', None)}"
+            )
+        intent = replace(intent, dp_size=args.dp_size)
+    phase = args.cuda_graph_config.prefill
+    receipt = prefill_identity(intent, phase)
+    if phase.backend != "disabled":
+        if intent.requested_backend != "breakable":
+            raise ValueError("Flash prefill resolved enabled without an explicit request")
+        receipt = validate_capture_request(args, intent)
+        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps({
+            "requested_backend": intent.requested_backend,
+            "capture_tokens": list(intent.capture_tokens), "dp_size": intent.dp_size,
+        })
+    return {**identity, "flash_prefill": {
+        **receipt, "resolved_dp_size": args.dp_size, "actual": _unobserved_flash_actual(),
+    }}
+
+
+def emit_flash_prefill_event(event):
+    """Worker stdout evidence, separate from the parent's unresolved actual state."""
+    print(json.dumps({**event, "component": "memt_flash_prefill", "pid": os.getpid(),
+                      "gpu_qualified": False}), flush=True)
+
+
+def emit_graph_stats(event):
+    """One line per phase per rank, printed when the worker process exits."""
+    print(json.dumps({**event, "pid": os.getpid()}), flush=True)
+
+
+def _worker_dp_rank():
+    """Rank for the counter summary, resolved at exit; None leaves pid-only rows."""
+    try:
+        from sglang.srt.distributed.parallel_state import get_world_group
+
+        return get_world_group().rank_in_group
+    except Exception:
+        return None
+
+
+def bootstrap(*, worker=True, replay_observer=None):
+    """Shared scheduler entry, including revision_launch's existing bootstrap().
+
+    Parent, tokenizer and detokenizer explicitly pass worker=False. Scheduler
+    wrappers must call this before constructing their native ModelRunner.
+    An explicit replay_observer(event) may synchronize for diagnosis; default
+    production replay has no extra device synchronization or per-batch logging.
+    """
     require_sglang()
     model = os.environ["MEMT_SGLANG_MODEL"]
     if model == "memt-nano":
@@ -134,10 +313,28 @@ def bootstrap():
     from memt_sglang.models.common.loader import install_model_loader
 
     install_model_loader()
+    if worker:
+        from memt_sglang.runtime import graph_stats
+
+        graph_stats.install_exit_summary(
+            model=model, rank=_worker_dp_rank, emit=emit_graph_stats,
+        )
+    request = os.environ.get("MEMT_FLASH_PREFILL_REQUEST")
+    if worker and model == "memt-flash" and request:
+        from memt_sglang.runtime.flash_prefill import (
+            FlashPrefillIntent,
+            install_native_worker,
+        )
+
+        payload = json.loads(request)
+        intent = FlashPrefillIntent(payload["requested_backend"],
+                                    tuple(payload["capture_tokens"]), payload["dp_size"])
+        install_native_worker(intent, emit=emit_flash_prefill_event,
+                              replay_observer=replay_observer)
 
 
 def run_scheduler(*args, **kwargs):
-    bootstrap()
+    bootstrap(worker=True)
     from memt_sglang.runtime.hooks import install_scheduler_hooks
 
     install_scheduler_hooks()
@@ -147,14 +344,14 @@ def run_scheduler(*args, **kwargs):
 
 
 def run_detokenizer(*args, **kwargs):
-    bootstrap()
+    bootstrap(worker=False)
     from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 
     return run_detokenizer_process(*args, **kwargs)
 
 
 def init_tokenizer(*args, **kwargs):
-    bootstrap()
+    bootstrap(worker=False)
     from sglang.srt.entrypoints.http_server import init_tokenizer_manager
 
     result = init_tokenizer_manager(*args, **kwargs)
@@ -189,7 +386,7 @@ def main(argv=None):
     os.environ["MEMT_STATE_DIRECTORY"] = (
         str(Path(options.state_directory).resolve()) if options.state_directory else ""
     )
-    bootstrap()
+    bootstrap(worker=False)
     from sglang.srt.entrypoints import http_server
     from sglang.srt.server_args import prepare_server_args
     from sglang.srt.utils import kill_process_tree
@@ -197,6 +394,7 @@ def main(argv=None):
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
+    sync_graph_config(args)
     validate_server_args(
         args,
         identity["model"],
@@ -205,6 +403,16 @@ def main(argv=None):
         runtime=identity["memt_runtime"],
         config_file=options.config,
         deterministic_communication=options.deterministic_communication,
+    )
+    identity = resolve_flash_prefill(options, args, identity)
+    identity["execution"] = execution_identity(args)
+    identity["mode"] = (
+        "breakable"
+        if any(
+            backend == "breakable"
+            for backend in identity["execution"]["graph_backends"].values()
+        )
+        else "eager"
     )
     identity["dependencies"] = {
         name: metadata.version(name) for name in ("sglang", "torch", "transformers")

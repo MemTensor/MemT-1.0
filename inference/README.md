@@ -73,7 +73,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling backend | Triton / PyTorch | Triton / PyTorch |
 | Retained streaming sessions | Disabled | Enabled |
 
-Both scripts use eager execution and explicit memory/KV budgets for single-node BF16 serving. These values are examples, not fixed parallelism requirements; extra native SGLang arguments override script values subject to the startup checks below.
+Both scripts use explicit memory/KV budgets for single-node BF16 serving. Slot reads and CUDA Graphs are opt-in; see [Recommended configuration](#recommended-configuration). These values are deployment examples; extra native SGLang arguments remain subject to startup validation.
 
 ### Launcher arguments
 
@@ -98,7 +98,7 @@ python -m memt_sglang.launch --model-path /models/MemT-1.0-Nano --dry-run
 
 Dry-run does not validate SGLang arguments. Normal startup validates the actual `ServerArgs` returned by SGLang after parsing and post-processing, before launching the server. Configuration validation does not execute checkpoint Python model code.
 
-Serving requires single-node eager execution with unquantized BF16 safetensors. Chunked prefill is disabled (`--chunked-prefill-size -1`), and radix cache, overlap scheduling, and both prefill and decode CUDA graphs must remain disabled. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
+Serving requires single-node unquantized BF16 safetensors. Chunked prefill (`--chunked-prefill-size -1`) and overlap are disabled by default; radix cache must remain disabled. Compatible prefill/decode shapes may use CUDA Graph replay; incompatible shapes use eager execution. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
 
 Nano requires DP attention to be disabled. Flash enables DP attention and requires `tp_size == dp_size`, giving attention TP1. The launcher rejects `trust_remote_code`, `--config` merging and request header overrides. Additional unsupported execution modes are listed in [validation.py](memt_sglang/validation.py).
 
@@ -112,6 +112,42 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_STATE_DIRECTORY` | Startup script snapshot directory; default `./memt-state`. |
 | `MEMT_API_KEY` | API key read by the CLI and supplied examples, sent as `Authorization: Bearer ...`. This does not configure the server's API key. |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | Must remain disabled; enabling it is rejected at startup. |
+| `MEMT_EXPERIMENT_METADATA_CACHE` | Reuse token/slot metadata across memory layers; default `1`. |
+| `MEMT_EXPERIMENT_SLOT_READ` | Read state slots directly; default `0`. |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
+| `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
+| `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release a coalesced batch at this many requests / input tokens; defaults 4 / 4096. |
+
+### Recommended configuration
+
+Enable metadata cache, slot reads and both CUDA Graph phases:
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano
+```
+
+For Flash, also request the prefill graph shapes explicitly:
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_flash.sh /models/MemT-1.0-Flash \
+  --cuda-graph-config '{"prefill":{"backend":"breakable","bs":[512,1024,4096]},"decode":{"backend":"breakable","bs":[1,2,4,8]}}'
+```
+
+Batches that a captured graph cannot serve run eagerly. Memory blocks always run eagerly.
+
+Layout requirements:
+
+- Nano: DP attention disabled.
+- Flash prefill graph and query coalescing: attention TP1 (`tp_size == dp_size == ep_size`, DP ≥ 2) with an explicit `--dp-size`, PP1, A2A `none`, overlap disabled.
+
+Overlap, query chunking and query coalescing are optional, off by default, and not part of the recommended configuration.
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 

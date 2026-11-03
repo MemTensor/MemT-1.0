@@ -12,7 +12,7 @@ from memt_sglang.models.deepseek.ops.compiled_tensor_ops import (
     resolve_stable_qk,
 )
 from memt_sglang.models.deepseek.ops.packed import token_memory_packed
-from memt_sglang.models.deepseek.ops.read import snapshot_read
+from memt_sglang.models.deepseek.ops.read import packed_snapshot_read
 
 
 class _LatentNorm(nn.Module):
@@ -154,6 +154,40 @@ class DeepSeekMemoryBlock(nn.Module):
     def packed(self, hidden_states, read_states, *, lengths, commit, write_states):
         validate_packed_inputs(self, hidden_states, read_states, write_states, lengths)
 
+        return self._compute_packed(
+            hidden_states,
+            read_states,
+            lengths=lengths,
+            commit=commit,
+            write_states=write_states,
+        )
+
+    @torch.no_grad()
+    def packed_query_slots(self, hidden_states, state_pool, slots, *, lengths):
+        from memt_sglang.models.deepseek.ops.slot_read import gather_bf16
+
+        if (hidden_states.ndim != 2 or hidden_states.shape[1] != self.hidden_size or (not hidden_states.is_cuda) or (hidden_states.dtype != torch.bfloat16) or (not lengths) or any((type(length) is not int or length < 1 for length in lengths)) or (sum(lengths) != len(hidden_states))) or (state_pool.shape[1:] != (self.num_heads, self.head_dim, self.head_dim) or state_pool.device != hidden_states.device or slots.numel() != len(lengths)):
+            states = state_pool.index_select(0, slots)
+            return self.packed(hidden_states, states, lengths=lengths,
+                               commit=False, write_states=states)
+        read_states = gather_bf16(state_pool, slots)
+        return self._compute_packed(
+            hidden_states,
+            read_states,
+            lengths=lengths,
+            commit=False,
+            write_states=None,
+        )
+
+    def _compute_packed(
+        self,
+        hidden_states,
+        read_states,
+        *,
+        lengths,
+        commit,
+        write_states,
+    ):
         q, k, v, output_gate, erase, write, log_decay = self._project(hidden_states)
         query, key = self._prepare_qk(q, k, erase)
         if commit:
@@ -170,13 +204,7 @@ class DeepSeekMemoryBlock(nn.Module):
                 chunk_tokens=self.chunk_tokens,
             )
         else:
-            read = snapshot_read(
-                query,
-                read_states,
-                lengths,
-                self.read_scale,
-                bf16_accumulator_output=True,
-            )
+            read = packed_snapshot_read(query, read_states, lengths, self.read_scale)
             next_state = None
         return self.o_norm(read, output_gate).reshape(
             len(hidden_states), self.value_dim

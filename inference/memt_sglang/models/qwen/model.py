@@ -62,6 +62,12 @@ class MemTQwen3_5MoeForCausalLM(nn.Module):
         missing = set(dict(self.named_parameters())) - result
         if missing:
             raise ValueError(f"Qwen native weights are missing: {sorted(missing)[:8]}")
+        from memt_sglang.runtime.features import enabled
+
+        if enabled("PREFILL_GRAPH"):
+            from memt_sglang.models.qwen.padding import install_live_gate_projection
+
+            install_live_gate_projection(self.model)
         self._memory_hooks = QwenMemoryHooks(self, blocks)
         return result
 

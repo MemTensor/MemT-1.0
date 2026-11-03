@@ -73,7 +73,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | MoE / sampling 后端 | Triton / PyTorch | Triton / PyTorch |
 | 保留流式会话 KV | 关闭 | 开启 |
 
-两个脚本均采用 eager 执行，并显式设置记忆和 KV 预算，用于单节点 BF16 服务。这些值是部署示例，不是固定的并行度要求；额外的 SGLang 原生参数可以覆盖脚本值，但仍须通过下述启动检查。
+两个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。Slot read 与 CUDA Graph 需显式开启，见[推荐配置](#推荐配置)。这些值是部署示例，额外的 SGLang 原生参数仍须通过启动校验。
 
 ### Launcher 参数
 
@@ -98,7 +98,7 @@ python -m memt_sglang.launch --model-path /models/MemT-1.0-Nano --dry-run
 
 Dry-run 不校验 SGLang 参数。正常启动会在 SGLang 完成参数解析和后处理后，对实际生成的 `ServerArgs` 进行校验，通过后才启动服务。配置校验不会执行 checkpoint 中的 Python 模型代码。
 
-服务仅支持单节点 eager 执行和未量化的 BF16 safetensors 权重。必须关闭 chunked prefill（`--chunked-prefill-size -1`）、radix cache、overlap scheduling，以及 prefill 和 decode 两阶段的 CUDA graph。`max_prefill_tokens` 不得小于 checkpoint 的 `memt.chunk_tokens`。
+服务使用单节点未量化的 BF16 safetensors 权重。默认关闭 chunked prefill（`--chunked-prefill-size -1`）与 overlap，radix cache 必须关闭；兼容的 prefill/decode shape 可以使用 CUDA Graph，不兼容时使用 eager 路径。`max_prefill_tokens` 不得小于 checkpoint 的 `memt.chunk_tokens`。
 
 Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size == dp_size`，使 attention TP 为 1。Launcher 拒绝 `trust_remote_code`、`--config` 配置合并和 request header overrides。其他不支持的执行模式见 [validation.py](memt_sglang/validation.py)。
 
@@ -112,6 +112,42 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_STATE_DIRECTORY` | 启动脚本的快照目录，默认 `./memt-state`。 |
 | `MEMT_API_KEY` | CLI 和示例读取的 API key，以 `Authorization: Bearer ...` 发送；该变量不配置服务端的 API key。 |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
+| `MEMT_EXPERIMENT_METADATA_CACHE` | 跨记忆层复用 token/slot 元数据，默认 `1`。 |
+| `MEMT_EXPERIMENT_SLOT_READ` | 按 slot 直接读取状态，默认 `0`。 |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token。默认 `0`。 |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 合并达到该请求数 / 输入 token 数即放行；默认 4 / 4096。 |
+
+### 推荐配置
+
+开启 metadata 缓存、slot read 和两个阶段的 CUDA Graph：
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_nano.sh /models/MemT-1.0-Nano
+```
+
+Flash 还需显式指定 prefill graph 形状：
+
+```bash
+MEMT_EXPERIMENT_METADATA_CACHE=1 MEMT_EXPERIMENT_SLOT_READ=1 \
+MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
+sh start_memt_flash.sh /models/MemT-1.0-Flash \
+  --cuda-graph-config '{"prefill":{"backend":"breakable","bs":[512,1024,4096]},"decode":{"backend":"breakable","bs":[1,2,4,8]}}'
+```
+
+已捕获的 graph 无法处理的 batch 以 eager 执行；记忆模块始终以 eager 执行。
+
+布局要求：
+
+- Nano：关闭 DP attention。
+- Flash prefill graph 与 query 合并：attention TP1（`tp_size == dp_size == ep_size`，DP ≥ 2），显式传入 `--dp-size`，PP1，A2A `none`，关闭 overlap。
+
+Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于推荐配置。
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 

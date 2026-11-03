@@ -10,9 +10,7 @@ from memt_sglang.models.common.hf_config import memt_model
 from memt_sglang.runtime.config import RuntimeConfig
 
 REQUIRED_SERVER_VALUES = {
-    "chunked_prefill_size": -1,
     "disable_radix_cache": True,
-    "disable_overlap_schedule": True,
     "pp_size": 1,
     "attn_cp_size": 1,
     "dcp_size": 1,
@@ -96,6 +94,26 @@ def validate_runtime_config(config, override, capacity_overrides):
     return asdict(RuntimeConfig.from_hf_config({"memt_runtime": runtime}))
 
 
+def _validate_query_coalescing_layout(args, model):
+    """Coalescing layouts: hard limits plus the validated Flash MoE split.
+
+    Nano: the TP leader broadcasts each decision on the attention-TP group, which
+    needs no DP attention (already enforced for Nano) and works for any TP size.
+    Flash: the DP path all-reduces one row per DP rank on the world group, so it
+    needs DP attention with attention TP1 (tp == dp) and DP >= 2. ep == tp is
+    not required by coalescing itself; it is kept so coalescing is only offered
+    on the MoE split that was validated, not on ep != tp layouts.
+    """
+    tp, dp, ep = args.tp_size, args.dp_size, args.ep_size
+    if model == "memt-nano":
+        return
+    if not (args.enable_dp_attention and dp >= 2 and tp == dp and ep == tp):
+        raise ValueError(
+            "Query coalescing on Flash requires DP attention with attention TP1 "
+            f"(tp == dp == ep, dp >= 2); got tp={tp}, dp={dp}, ep={ep}"
+        )
+
+
 def validate_server_args(
     args,
     model,
@@ -111,6 +129,22 @@ def validate_server_args(
     # SGLang consumes --config before constructing ServerArgs; it is not a field.
     if config_file is not None:
         raise ValueError("MemT does not support --config merging")
+    from memt_sglang.runtime.features import (
+        validate_graphs,
+        validate_overlap,
+        validate_query_chunks,
+    )
+    from memt_sglang.runtime.query_coalescing import config_from_env
+
+    validate_graphs(args)
+    validate_overlap(args)
+    validate_query_chunks(args)
+    if config_from_env() is not None:
+        _validate_query_coalescing_layout(args, model)
+        if args.enable_prefill_delayer:
+            raise ValueError(
+                "Query coalescing cannot be combined with native prefill delay"
+            )
     for name, expected in REQUIRED_SERVER_VALUES.items():
         if getattr(args, name) != expected:
             raise ValueError(f"MemT requires {name}={expected!r}")
@@ -120,20 +154,6 @@ def validate_server_args(
     for name in DISALLOWED_SERVER_FLAGS:
         if getattr(args, name):
             raise ValueError(f"MemT does not support {name}")
-    graph = args.cuda_graph_config
-    for phase in ("prefill", "decode"):
-        item = (
-            graph.get(phase, {})
-            if isinstance(graph, Mapping)
-            else getattr(graph, phase, None)
-        )
-        backend = (
-            item.get("backend")
-            if isinstance(item, Mapping)
-            else getattr(item, "backend", None)
-        )
-        if backend != "disabled":
-            raise ValueError(f"MemT requires {phase} CUDA graphs disabled")
     for name, supported in MODEL_SERVER_VALUES[model].items():
         if getattr(args, name) not in supported:
             raise ValueError(f"{model} requires {name} in {supported!r}")

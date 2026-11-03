@@ -12,6 +12,7 @@ class DeepSeekMemoryHooks(MemoryHooks):
         self.model = model
         self.pending = {}
         self.handles = []
+        eager_memory = self.setup_execution(dp_attention=True)
         attentions = {}
         # Validate everything before registering the first block/hook.
         for layer, block in blocks.items():
@@ -35,22 +36,33 @@ class DeepSeekMemoryHooks(MemoryHooks):
             attn.add_module("memt", blocks[layer])
             self.handles.append(
                 attn.register_forward_pre_hook(
-                    self._prepare(layer, attn), with_kwargs=True
+                    eager_memory(self._prepare(layer, attn)), with_kwargs=True
                 )
             )
             self.handles.append(
-                attn.wo_b.register_forward_pre_hook(self._inject(layer))
+                attn.wo_b.register_forward_pre_hook(eager_memory(self._inject(layer)))
             )
 
     def _prepare(self, layer, attn):
         def hook(module, positional, kwargs):
             runtime = getattr(self.model, "memt_runtime", None)
-            if runtime is None or runtime.plan is None or not runtime.plan.samples:
+            active = (
+                runtime is not None
+                and runtime.plan is not None
+                and bool(runtime.plan.samples)
+            )
+            if not active and not self.graph_enabled:
                 return
             hidden = kwargs["x"]
+            if len(hidden) == 0:
+                return
             output = hidden.new_empty((len(hidden), attn.memt.value_dim))
 
-            memory = runtime.run_layer(layer, hidden, output, attn.memt)
+            memory = (
+                runtime.run_layer(layer, hidden, output, attn.memt)
+                if active
+                else output.zero_()
+            )
 
             # Attention TP is 1: no head slicing and no collective on memory.
             memory = memory.view(len(hidden), attn.n_heads, attn.head_dim)
