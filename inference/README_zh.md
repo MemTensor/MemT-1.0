@@ -114,11 +114,11 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | 默认 `1`，在一次 forward 内跨记忆层复用 token/slot 元数据；设为 `0` 关闭。 |
 | `MEMT_EXPERIMENT_SLOT_READ` | 设为 `1` 启用按 slot 直接读取，默认 `0`。 |
-| `MEMT_EXPERIMENT_PREFILL_GRAPH` | 设为 `1` 显式开启 prefill graph，默认 `0`。Nano 支持 native capture gear padding，同时保留有效 token 数和实时请求区间；Flash 须满足下文的显式配置与本地 gear 精确匹配检查。 |
+| `MEMT_EXPERIMENT_PREFILL_GRAPH` | 设为 `1` 显式开启 prefill graph，默认 `0`。Nano 支持 native capture gear padding，同时保留有效 token 数和实时请求区间；Flash 须满足下文的显式配置。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | 设为 `1` 启用 decode graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 分别设为 `1` 启用对应阶段的 native overlap，默认均为 `0`；commit 边界同步。 |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | 设为 `1` 允许 query chunk，并显式传入 `--chunked-prefill-size`；解析后每 rank 预算须 ≥2048，默认 `0`。完整 commit 仍一次 forward 执行，可超过 query 预算。 |
-| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲边界主动等待上限，单位 ms，默认 `0`（关闭），启用时须在 `(0, 10]`；只支持 Nano TP2 或 Flash TP=DP=EP4/8。 |
+| `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲边界主动等待上限，单位 ms，默认 `0`（关闭），启用时须在 `(0, 10]`；要求 Nano 不开启 DP attention，或 Flash 为 attention TP1（`tp_size == dp_size == ep_size`，DP ≥ 2）。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 达到任一阈值立即放行；启用等待时默认为 4 请求／4096 输入 tokens，非 batch 上限。 |
 
 例如，启用 Nano 的组合特性：
@@ -129,7 +129,7 @@ MEMT_EXPERIMENT_PREFILL_GRAPH=1 MEMT_EXPERIMENT_DECODE_GRAPH=1 \
 sh start_memt_nano.sh /models/MemT-1.0-Nano
 ```
 
-可用 `--cuda-graph-config` 指定需要捕获的 batch/token 形状。Flash 在固定的 PyTorch 2.11.0 / SGLang 0.5.16 环境中支持显式请求实验性 prefill 与 decode graph。Prefill 实验要求 TP4 / DP4 / EP4、PP1、DP attention、A2A `none`、关闭 overlap、未量化 BF16 权重，并通过固定版本的 native 兼容性检查；这与上面的 TP8 脚本示例不同。请求 prefill graph 时，capture gears 默认为 `[512, 1024]`；`[512, 1024, 4096]` 须显式选择。Prefill replay 还要求四个 rank 的原始 token 数均非零且相等，每个 rank 的实际 token 数精确匹配已捕获的本地 gear，元数据兼容且所有 rank 达成一致。Idle、uneven 或未匹配的 batch 回退 eager。两阶段 graph 均默认关闭；capture 成功本身不代表实际 replay 或数值验收完成。专项 GPU 验证已覆盖四个 rank 的本地 gear 512、1024、4096，以及 idle、uneven prefill 的 eager 回退。这些检查不代表 batch invariance；验证结果和限制见下文。
+可用 `--cuda-graph-config` 指定需要捕获的 batch/token 形状。Flash 在固定的 PyTorch 2.11.0 / SGLang 0.5.16 环境中支持显式请求实验性 prefill 与 decode graph。Prefill 实验要求 attention TP1（`tp_size == dp_size == ep_size`，DP ≥ 2）并显式给出 `--dp-size`，以及 PP1、DP attention、A2A `none`、关闭 overlap、未量化 BF16 权重，并通过固定版本的 native 兼容性检查；已在 TP4 / DP4 / EP4 上验证。请求 prefill graph 时，capture gears 默认为 `[512, 1024]`；`[512, 1024, 4096]` 须显式选择。Replay 时所有 rank（包括 idle rank）补齐到同一个 gear：取本轮各 rank token 数的最大值，选不小于它的最小已捕获 gear。超过最大 gear 或需要补齐超过 2 倍的轮次走 eager；gears 为 512/1024/4096 时，即少于 256 或 1025–2047 个 token。两阶段 graph 均默认关闭；验证结果和限制见下文。
 
 所有 MemT memory blocks 始终以 eager 执行，包括 breakable graph replay 期间。Eager/opt-in 对照是组合特性对照：eager 使用 metadata cache `0`、slot read `0` 且关闭两阶段 graph；opt-in 组合显式开启 metadata cache、slot read 与两阶段 graph。Nano 两种配置中的 ordinary reader 和 slot reader 仍共用不可变 query geometry LRU；Flash 的普通与 slot read 共用单 token reader 快路径。
 
