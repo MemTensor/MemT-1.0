@@ -1,0 +1,447 @@
+diff --git a/python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh b/python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh
+index b1ccd24..c0a8ef0 100644
+--- a/python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh
++++ b/python/sglang/jit_kernel/csrc/deepseek_v4/topk_v1.cuh
+@@ -6,6 +6,10 @@
+ #include <dlpack/dlpack.h>
+ #include <tvm/ffi/container/tensor.h>
+ 
++#ifdef SGL_DSV4_STABLE_EXACT_TOPK
++#include <cub/block/block_radix_sort.cuh>
++#endif
++
+ #include <bit>
+ #include <cstdint>
+ 
+@@ -38,6 +42,9 @@ SGL_DEVICE uint8_t convert_to_uint8(float x) {
+ }
+ 
+ SGL_DEVICE uint32_t convert_to_uint32(float x) {
++#ifdef SGL_DSV4_STABLE_EXACT_TOPK
++  x = x == 0.0f ? 0.0f : x;  // signed zero is a logical tie
++#endif
+   uint32_t bits = __float_as_uint(x);
+   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+ }
+@@ -69,6 +76,100 @@ SGL_DEVICE void naive_transform(
+   }
+ }
+ 
++#ifdef SGL_DSV4_STABLE_EXACT_TOPK
++[[maybe_unused]]
++SGL_DEVICE void radix_topk(const float* __restrict__ input, int32_t* __restrict__ output, const uint32_t length) {
++  constexpr uint32_t RADIX = 256;
++  constexpr uint32_t BLOCK_SIZE = kTopKBlockSize;
++  constexpr uint32_t WARPS = BLOCK_SIZE / 32;
++  alignas(128) __shared__ uint32_t histogram[2][RADIX + 32];
++  __shared__ uint32_t threshold, prefix, prefix_mask, remain, counter, tie_prefix;
++  __shared__ uint32_t warp_counts[WARPS];
++  const uint32_t tx = threadIdx.x;
++  if (tx == 0) {
++    prefix = 0;
++    prefix_mask = 0;
++    remain = kTopK;
++    counter = 0;
++    tie_prefix = 0;
++  }
++  __syncthreads();
++
++  // Scan the complete candidate range at each byte. Never truncate a coarse
++  // bucket to a shared-memory list: that can discard a unique best score.
++#pragma unroll
++  for (int round = 0; round < 4; ++round) {
++    if (tx < RADIX + 1) histogram[0][tx] = 0;
++    __syncthreads();
++    const uint32_t shift = 24 - round * 8;
++    const uint32_t old_prefix = prefix;
++    const uint32_t old_mask = prefix_mask;
++    for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
++      const uint32_t key = convert_to_uint32(input[idx]);
++      if ((key & old_mask) == old_prefix) {
++        ::atomicAdd(&histogram[0][(key >> shift) & 0xffu], 1);
++      }
++    }
++    __syncthreads();
++#pragma unroll
++    for (uint32_t pass = 0; pass < 8; ++pass) {
++      if (tx < RADIX) {
++        uint32_t value = histogram[pass & 1][tx];
++        if (tx + (1u << pass) < RADIX) {
++          value += histogram[pass & 1][tx + (1u << pass)];
++        }
++        histogram[(pass & 1) ^ 1][tx] = value;
++      }
++      __syncthreads();
++    }
++    // Standard kth-bin boundary, including the case candidates == remain.
++    if (tx < RADIX && histogram[0][tx] >= remain && histogram[0][tx + 1] < remain) {
++      threshold = tx;
++    }
++    __syncthreads();
++    const uint32_t selected_bin = threshold;
++    for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
++      const uint32_t key = convert_to_uint32(input[idx]);
++      if ((key & old_mask) == old_prefix && ((key >> shift) & 0xffu) > selected_bin) {
++        const uint32_t pos = ::atomicAdd(&counter, 1);
++        output[pos] = idx;
++      }
++    }
++    __syncthreads();
++    if (tx == 0) {
++      remain -= histogram[0][selected_bin + 1];
++      prefix = old_prefix | (selected_bin << shift);
++      prefix_mask = old_mask | (0xffu << shift);
++    }
++    __syncthreads();
++  }
++
++  // Equal-score membership is chosen by logical position. Atomic arrival
++  // order cannot decide which members survive the kth-score cutoff.
++  const uint32_t lane = tx & 31u;
++  const uint32_t warp = tx >> 5;
++  for (uint32_t base = 0; base < length; base += BLOCK_SIZE) {
++    const uint32_t idx = base + tx;
++    const bool tied = idx < length && convert_to_uint32(input[idx]) == prefix;
++    const uint32_t votes = __ballot_sync(0xffffffffu, tied);
++    const uint32_t lane_prefix = __popc(votes & ((1u << lane) - 1u));
++    if (lane == 0) warp_counts[warp] = __popc(votes);
++    __syncthreads();
++    uint32_t before_warp = 0;
++    for (uint32_t w = 0; w < warp; ++w) before_warp += warp_counts[w];
++    const uint32_t pos = tie_prefix + before_warp + lane_prefix;
++    if (tied && pos < remain) output[counter + pos] = idx;
++    __syncthreads();
++    if (tx == 0) {
++      for (uint32_t w = 0; w < WARPS; ++w) tie_prefix += warp_counts[w];
++    }
++    __syncthreads();
++    if (tie_prefix >= remain) break;
++  }
++  __syncthreads();
++}
++
++#else
+ [[maybe_unused]]
+ SGL_DEVICE void radix_topk(const float* __restrict__ input, int32_t* __restrict__ output, const uint32_t length) {
+   constexpr uint32_t RADIX = 256;
+@@ -227,6 +328,8 @@ SGL_DEVICE void radix_topk(const float* __restrict__ input, int32_t* __restrict_
+   }
+ }
+ 
++#endif
++
+ template <bool kUsePDL>
+ __global__ void topk_transform_kernel(const __grid_constant__ TopKParams params) {
+   const auto &[
+@@ -236,13 +339,18 @@ __global__ void topk_transform_kernel(const __grid_constant__ TopKParams params)
+   const uint32_t work_id = blockIdx.x;
+ 
+   /// NOTE: dangerous prefetch seq_len before PDL wait
++#ifndef SGL_DSV4_STABLE_EXACT_TOPK
+   const uint32_t seq_len = seq_lens[work_id];
++#endif
+   const auto score_ptr = scores + work_id * score_stride;
+   const auto page_ptr = page_table + work_id * page_table_stride;
+   const auto indices_ptr = page_indices + work_id * kTopK;
+   const auto raw_indices_ptr = raw_indices != nullptr ? raw_indices + work_id * kTopK : nullptr;
+ 
+   device::PDLWaitPrimary<kUsePDL>();
++#ifdef SGL_DSV4_STABLE_EXACT_TOPK
++  const uint32_t seq_len = seq_lens[work_id];
++#endif
+ 
+   if (seq_len <= kTopK) {
+     naive_transform(score_ptr, page_ptr, indices_ptr, raw_indices_ptr, seq_len, page_bits);
+@@ -251,10 +359,19 @@ __global__ void topk_transform_kernel(const __grid_constant__ TopKParams params)
+     radix_topk(score_ptr, s_topk_indices, seq_len);
+     static_assert(kTopK <= kTopKBlockSize);
+     const auto tx = threadIdx.x;
++#ifdef SGL_DSV4_STABLE_EXACT_TOPK
++    using LogicalSort = cub::BlockRadixSort<int32_t, kTopKBlockSize, 1>;
++    __shared__ typename LogicalSort::TempStorage logical_sort_storage;
++    int32_t logical[1] = {s_topk_indices[tx]};
++    LogicalSort(logical_sort_storage).Sort(logical);
++    const auto selected_index = logical[0];
++#else
++    const auto selected_index = s_topk_indices[tx];
++#endif
+     if (kTopK == kTopKBlockSize || tx < kTopK) {
+-      indices_ptr[tx] = page_to_indices(page_ptr, s_topk_indices[tx], page_bits);
++      indices_ptr[tx] = page_to_indices(page_ptr, selected_index, page_bits);
+       if (raw_indices_ptr != nullptr) {
+-        raw_indices_ptr[tx] = s_topk_indices[tx];
++        raw_indices_ptr[tx] = selected_index;
+       }
+     }
+   }
+diff --git a/python/sglang/jit_kernel/dsv4/topk.py b/python/sglang/jit_kernel/dsv4/topk.py
+index fdaedfd..641fa7f 100644
+--- a/python/sglang/jit_kernel/dsv4/topk.py
++++ b/python/sglang/jit_kernel/dsv4/topk.py
+@@ -16,15 +16,18 @@ from .utils import make_name
+ 
+ 
+ @cache_once
+-def _jit_topk_v1_module(topk: int):
++def _jit_topk_v1_module(topk: int, stable_exact: bool = False):
+     args = make_cpp_args(is_arch_support_pdl())
+     assert topk in (512, 1024), "Only support topk=512 or 1024"
+     return load_jit(
+-        make_name(f"topk_v1_{topk}"),
++        make_name(
++            f"topk_v1_stable_exact_v1_{topk}" if stable_exact else f"topk_v1_{topk}"
++        ),
+         *args,
+         cuda_files=["deepseek_v4/topk_v1.cuh"],
+         cuda_wrappers=[("topk_transform", f"TopKKernel<{args}>::transform")],
+-        extra_cuda_cflags=[f"-DSGL_TOPK={topk}"],
++        extra_cuda_cflags=[f"-DSGL_TOPK={topk}"]
++        + (["-DSGL_DSV4_STABLE_EXACT_TOPK=1"] if stable_exact else []),
+     )
+ 
+ 
+@@ -61,6 +64,32 @@ def topk_transform_512(
+         )
+ 
+ 
++STABLE_EXACT_TOPK_API_VERSION = 1
++
++
++def topk_transform_512_stable(
++    scores: torch.Tensor,
++    seq_lens: torch.Tensor,
++    page_tables: torch.Tensor,
++    out_page_indices: torch.Tensor,
++    page_size: int,
++    out_raw_indices: Optional[torch.Tensor] = None,
++) -> None:
++    """Exact FP32 top-k, logical-id tie membership and logical output order.
++
++    Explicit CUDA-only entry point. The original v1/v2 entry points retain
++    their existing implementation and defaults.
++    """
++    if is_hip_runtime():
++        raise ValueError("Stable exact DSV4 top-k currently requires CUDA")
++    if scores.shape[0] == 0:
++        return
++    module = _jit_topk_v1_module(out_page_indices.shape[1], True)
++    module.topk_transform(
++        scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices
++    )
++
++
+ # metadata is (batch+1, 2) int32: row 0 = {cluster_threshold, num_cluster_items};
+ # rows 1..N = {batch_id, seq_len} of items routed to the persistent cluster pool.
+ _PLAN_METADATA_INTS_PER_BATCH = 2
+diff --git a/python/sglang/kernels/ops/layernorm/mhc.py b/python/sglang/kernels/ops/layernorm/mhc.py
+index 190d408..2ff2ce5 100644
+--- a/python/sglang/kernels/ops/layernorm/mhc.py
++++ b/python/sglang/kernels/ops/layernorm/mhc.py
+@@ -2,6 +2,7 @@ import functools
+ import importlib
+ import logging
+ import math
++import os
+ import threading
+ from typing import Tuple
+ 
+@@ -539,7 +540,23 @@ def mhc_pre_gemm_sqrsum_splitk_kernel(
+     )
+ 
+ 
++FIXED_MHC_REDUCTION_API_VERSION = 1
++
++
+ def _compute_num_split_for_mhc_pre(num_tokens: int, hc_hidden_size: int) -> int:
++    if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower() in (
++        "1",
++        "true",
++    ):
++        fixed = os.environ.get("SGLANG_DSV4_MHC_FIXED_SPLITS")
++        if fixed is not None:
++            # Fix the reduction partition independently of batch size. Native
++            # kernels validate their own geometry; a measured model shape is
++            # not a restriction on other configurations.
++            splits = int(fixed)
++            if splits <= 0:
++                raise ValueError("SGLANG_DSV4_MHC_FIXED_SPLITS must be positive")
++            return splits
+     block_m, block_k = 64, 64
+     grid_size = (num_tokens + block_m - 1) // block_m
+     num_block_k = (hc_hidden_size + block_k - 1) // block_k
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index c46a8c5..e72fd2d 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -289,6 +289,8 @@ else:
+         pass
+ 
+ 
++DSV4_PHASE_ISOLATION_API_VERSION = 1
++
+ logger = logging.getLogger(__name__)
+ 
+ # Test retract decode for debugging purposes
+@@ -2783,7 +2785,18 @@ class Scheduler(
+         need_mlp_sync = self.require_mlp_sync
+         if (
+             need_mlp_sync
+-            and not self.spec_algorithm.is_none()
++            and (
++                not self.spec_algorithm.is_none()
++                or (
++                    self.server_args.attention_backend == "dsv4"
++                    and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++                    in ("1", "true")
++                    and os.environ.get(
++                        "SGLANG_DSV4_ISOLATE_PREFILL_DECODE", "0"
++                    ).lower()
++                    in ("1", "true")
++                )
++            )
+             and not self.server_args.speculative_skip_dp_mlp_sync
+         ):
+             # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.
+diff --git a/python/sglang/srt/models/deepseek_v2.py b/python/sglang/srt/models/deepseek_v2.py
+index a406c08..e548f69 100644
+--- a/python/sglang/srt/models/deepseek_v2.py
++++ b/python/sglang/srt/models/deepseek_v2.py
+@@ -21,6 +21,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import os
+ from contextlib import nullcontext
+ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+ 
+@@ -493,6 +494,13 @@ class MoEGate(nn.Module):
+                 True,  # is_vnni
+             )
+ 
++        if self.is_deepseek_v4 and os.environ.get(
++            "SGLANG_DSV4_DETERMINISTIC_PROFILE", "0"
++        ).lower() in ("1", "true"):
++            # DSV4 hash_topk expects FP32 router logits. Keep that contract
++            # when the explicit deterministic profile replaces router GEMMs.
++            return F.linear(hidden_states.float(), self.weight.float(), None)
++
+         if get_server_args().enable_deterministic_inference:
+             return F.linear(hidden_states, self.weight, None)
+ 
+@@ -536,6 +544,22 @@ class MoEGate(nn.Module):
+         return logits
+ 
+ 
++DSV4_MOE_COMBINE_FP32_API_VERSION = 1
++
++
++def _dsv4_profile_all_reduce(value, *, is_dsv4):
++    if (
++        is_dsv4
++        and os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++        in ("1", "true")
++        and os.environ.get("SGLANG_DSV4_MOE_COMBINE_FP32", "0").lower() in ("1", "true")
++    ):
++        # Keep expert kernels and their BF16 partial outputs unchanged. Only
++        # collective accumulation is FP32, followed by one original-dtype cast.
++        return tensor_model_parallel_all_reduce(value.float()).to(value.dtype)
++    return tensor_model_parallel_all_reduce(value)
++
++
+ class DeepseekV2MoE(nn.Module):
+ 
+     def __init__(
+@@ -1014,7 +1038,9 @@ class DeepseekV2MoE(nn.Module):
+         if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
+             is_tp_path=True,
+         ):
+-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
+         # TP1 shared experts are replicated, so add them after all-reduce to
+         # avoid summing the same shared output once per TP rank.
+         if self._shared_expert_tp1:
+@@ -1136,7 +1162,9 @@ class DeepseekV2MoE(nn.Module):
+         if self.tp_size > 1 and not should_skip_post_experts_all_reduce(
+             is_tp_path=True,
+         ):
+-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
+         # TP1 shared experts are replicated, so add them after all-reduce to
+         # avoid summing the same shared output once per TP rank.
+         if shared_output is not None and self._shared_expert_tp1:
+@@ -1195,7 +1223,9 @@ class DeepseekV2MoE(nn.Module):
+             True,  # is_vnni
+         )
+         if self.tp_size > 1 and not get_forward().fuse_mlp_allreduce:
+-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
++            final_hidden_states = _dsv4_profile_all_reduce(
++                final_hidden_states, is_dsv4=self.gate.is_deepseek_v4
++            )
+         return final_hidden_states
+ 
+     def forward_deepep(
+diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
+index 2648061..8085cee 100644
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -191,6 +191,8 @@ def _get_mhc_ops() -> MhcOps:
+     return MhcOps(hc_split_sinkhorn, mhc_fused_post_pre, npu_hc_pre)
+ 
+ 
++DSV4_DECODE_OWNERS_API_VERSION = 1
++
+ logger = logging.getLogger(__name__)
+ 
+ _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
+@@ -2046,6 +2048,12 @@ class DeepseekV4Model(nn.Module):
+         prefix: str = "",
+     ) -> None:
+         super().__init__()
++        self._pin_decode_graph_owners = get_bool_env_var(
++            "SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"
++        )
++        # Retain every capture version until model teardown; never replace
++        # these owners with tensors from an eager fallback or a later bucket.
++        self._decode_graph_tensor_owners = []
+         self.pp_group = get_pp_group()
+         self.hidden_size = config.hidden_size
+         if self.pp_group.is_first_rank:
+@@ -2334,6 +2342,14 @@ class DeepseekV4Model(nn.Module):
+                         prev_post=prev_post,
+                         prev_comb=prev_comb,
+                     )
++                if (
++                    self._pin_decode_graph_owners
++                    and forward_batch.forward_mode.is_decode()
++                    and torch.cuda.is_current_stream_capturing()
++                ):
++                    self._decode_graph_tensor_owners.append(
++                        (hidden_states, prev_residual, prev_post, prev_comb)
++                    )
+                 if capture_dspark and i in self.dspark_layers_to_capture:
+                     if use_fused:
+                         completed = layer.hc_post(
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 838b925..1cc7987 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -220,7 +220,15 @@ ATTENTION_BACKEND_CHOICES = [
+     "intel_xpu",
+ ]
+ 
++DSV4_DETERMINISTIC_PROFILE_API_VERSION = 1
++
+ DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
++    *(
++        ["dsv4"]
++        if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "0").lower()
++        in ("1", "true")
++        else []
++    ),
+     "ascend",
+     "fa3",
+     "fa4",

@@ -116,6 +116,11 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_EXPERIMENT_SLOT_READ` | 按 slot 直接读取状态，默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | 把只读记忆读取纳入 breakable decode graph；Nano 直接可用，Flash 需要附带依赖补丁。隐含 slot read 与 padded decode query。默认 `0`。 |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | 保留精度的 Nano 输出归一化融合与启动预热，默认 `0`。 |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | 复用不可变的 eager writer 几何，缓存有界且按 stream 隔离，不含会话或状态内容；默认 `0`。 |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | 整个 decode batch 按填充后的行读取并屏蔽非活跃行；默认 `0`。 |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | 原生 KV 容量被缩减时拒绝启动；默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token。默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |

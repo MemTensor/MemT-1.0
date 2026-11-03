@@ -116,6 +116,11 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_SLOT_READ` | Read state slots directly; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | Capture read-only memory reads in breakable decode graphs (Nano), or on Flash with the bundled dependency patch; implies slot read and padded decode query. Default `0`. |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | Precision-preserving Nano output-normalization fusion and startup tensor warmup; default `0`. |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | Reuse immutable eager-writer geometry in a bounded, stream-local cache. Holds no session or state data; default `0`. |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | Read a whole decode batch with padded rows and mask inactive ones; default `0`. |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | Fail startup when native KV capacity is clipped below the requested value; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
