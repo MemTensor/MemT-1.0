@@ -3,6 +3,17 @@
 import os
 from dataclasses import replace
 
+# Smallest per-rank query chunk budget this configuration has been validated at.
+# It is a tested range, not a correctness requirement, and is unrelated to the
+# checkpoint's `memt.chunk_tokens` (which sizes memory write events on the
+# commit path and is never read while serving a query). Chunking a query always
+# changes the prefill shapes, so a split query is not bitwise equal to an
+# unsplit one at any budget, including this one; queries shorter than the
+# budget are never split and stay bitwise equal. Lowering this bound needs the
+# same evidence per model: unsplit-versus-split logits across page, compression
+# and state-chunk boundaries.
+VALIDATED_MIN_QUERY_CHUNK_TOKENS = 2048
+
 
 def enabled(name, *, environment=None):
     environment = os.environ if environment is None else environment
@@ -73,10 +84,13 @@ def validate_graphs(args):
 def validate_query_chunks(args):
     chunk = getattr(args, "chunked_prefill_size", None)
     if type(chunk) is not int or (
-        chunk != -1 and not (enabled("QUERY_CHUNKS") and chunk >= 2048)
+        chunk != -1
+        and not (enabled("QUERY_CHUNKS") and chunk >= VALIDATED_MIN_QUERY_CHUNK_TOKENS)
     ):
         raise ValueError(
-            "Query chunking requires its experiment flag and budget >=2048; otherwise use -1"
+            "Query chunking requires its experiment flag and a per-rank budget of at "
+            f"least {VALIDATED_MIN_QUERY_CHUNK_TOKENS} tokens, the validated minimum; "
+            "otherwise use -1"
         )
 
 

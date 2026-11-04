@@ -53,6 +53,10 @@ def install_atomic_commit_guard():
                             raise RuntimeError(
                                 "Scheduler attempted to split an atomic commit"
                             )
+                        # The native result was computed without a chunk budget,
+                        # so it cannot describe the restored one. Report the
+                        # budget as native admission does: from its own state.
+                        return self.budget_state()
                     return result
         result = original(self, req, *args, **kwargs)
         if commit is not None and any(r is req for r in self.can_run_list):

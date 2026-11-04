@@ -117,7 +117,7 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token。默认 `0`。 |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token，该值是已验证的下限。长于预算的 query 会被切分，被切分的 query 在任何预算下都不与不分块逐位一致。默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 合并达到该请求数 / 输入 token 数即放行；默认 4 / 4096。 |
 
