@@ -154,6 +154,32 @@ Layout requirements:
 
 Overlap, query chunking and query coalescing are optional, off by default, and not part of the recommended configuration.
 
+### Memory decode graph coupling
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` is not a single switch. The launcher
+fills in four companions when they are unset, because a graph that replays a
+memory read needs all of them:
+
+| Companion | Default when the graph is on | What it selects |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | Reads memory through slots instead of the eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | Replays one padded query shape instead of a shape per batch |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | Stable exact C4 top-k tie ordering |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | Keeps captured tensors alive across replays |
+
+`setdefault` is used, so an explicit value wins: `MEMT_EXPERIMENT_C4_STABLE_TOPK=0`
+keeps the native top-k policy, and native selection remains usable with replay.
+Selection numerics and graph pointer ownership are independent decisions.
+
+Stable C4 is a **selection policy**, not an implementation detail. Two runs both
+reporting "memory decode graph on" can disagree on which experts C4 selects, so
+the resolved values of all four companions appear in the launch identity under
+`execution.memory_decode_graph`. Report them alongside any performance or
+accuracy number produced with the graph enabled.
+
+The graph also requires a breakable decode backend with overlap scheduling off;
+the launcher rejects incompatible combinations before any worker starts.
+
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 
 ## Python client

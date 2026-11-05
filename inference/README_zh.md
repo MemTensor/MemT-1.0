@@ -154,6 +154,28 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 
 Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于推荐配置。
 
+### Memory decode graph 的开关联动
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` 不是一个独立开关。未显式设置时，启动器会自动补齐
+四项配套，因为重放记忆读取的图需要它们同时成立：
+
+| 配套开关 | 图开启时的默认 | 作用 |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | 通过 slot 读取记忆，替代 eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | 重放单一 padding 查询形状，而非按 batch 各一档 |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | 稳定精确的 C4 top-k 定序 |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | 让捕获的张量在重放间保持存活 |
+
+用的是 `setdefault`，因此**显式值优先**：`MEMT_EXPERIMENT_C4_STABLE_TOPK=0` 保留原生 top-k
+策略，而原生选择同样可以配合重放使用。选择策略的数值与图指针所有权是两件独立的事。
+
+stable C4 是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
+可能在 C4 选中哪些专家上并不一致，所以四项配套的最终取值都写进启动身份
+`execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
+
+该图还要求 decode 后端为 breakable 且关闭 overlap 调度；不兼容组合会在任何 worker 启动前
+被启动器拒绝。
+
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 
 ## Python 客户端
