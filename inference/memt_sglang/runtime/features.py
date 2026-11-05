@@ -134,6 +134,15 @@ def validate_query_chunks(args):
         )
 
 
+def _pin_intermediates_enabled(*, environment=None):
+    """Pinned SGLang reads this one with its own case-insensitive boolean."""
+    environment = os.environ if environment is None else environment
+    return str(environment.get("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "0")).lower() in (
+        "1",
+        "true",
+    )
+
+
 def execution_identity(args):
     """Report resolved native settings, including the post-DP chunk budget."""
     graph = args.cuda_graph_config
@@ -149,6 +158,18 @@ def execution_identity(args):
     coalescing = config_from_env()
     result = dict(
         graph_backends=backends,
+        # A memory decode graph is not a single switch: it implies a reader, a
+        # query geometry, a selection policy and captured-tensor ownership.
+        # Recording them here keeps the run identity self-describing, so an arm
+        # cannot be described as "graph on" while its selection policy differs
+        # from the model the numbers were attributed to.
+        memory_decode_graph=dict(
+            enabled=enabled("MEMORY_DECODE_GRAPH"),
+            slot_read=enabled("SLOT_READ"),
+            padded_decode_query=enabled("PADDED_DECODE_QUERY"),
+            c4_stable_topk=enabled("C4_STABLE_TOPK"),
+            pin_decode_intermediates=_pin_intermediates_enabled(),
+        ),
         metadata_cache=enabled("METADATA_CACHE"),
         slot_read=enabled("SLOT_READ"),
         nano_compile=enabled("NANO_COMPILE"),
