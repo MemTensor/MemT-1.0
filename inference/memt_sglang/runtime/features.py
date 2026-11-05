@@ -304,6 +304,18 @@ def execution_identity(args):
     coalescing = config_from_env()
     result = dict(
         graph_backends=backends,
+        # A memory decode graph is not a single switch: it implies a reader, a
+        # query geometry, a selection policy and captured-tensor ownership.
+        # Recording them here keeps the run identity self-describing, so an arm
+        # cannot be described as "graph on" while its selection policy differs
+        # from the model the numbers were attributed to.
+        memory_decode_graph=dict(
+            enabled=enabled("MEMORY_DECODE_GRAPH"),
+            slot_read=enabled("SLOT_READ"),
+            padded_decode_query=enabled("PADDED_DECODE_QUERY"),
+            c4_stable_topk=enabled("C4_STABLE_TOPK"),
+            pin_decode_intermediates=native_flag("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"),
+        ),
         metadata_cache=enabled("METADATA_CACHE"),
         slot_read=enabled("SLOT_READ"),
         nano_compile=enabled("NANO_COMPILE"),
