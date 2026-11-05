@@ -439,10 +439,28 @@ def init_tokenizer(*args, **kwargs):
     return result
 
 
-def resolve_mhc_prewarm(args, model):
-    """Pinned native warmup allocates the resolved chunk budget as a shape."""
-    if model == "memt-flash" and args.chunked_prefill_size == -1:
-        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
+MHC_PREWARM = "SGLANG_DSV4_MHC_PREWARM"
+
+
+def resolve_mhc_prewarm(model, chunked_prefill_size):
+    """Single decision point for the pinned MHC prewarm.
+
+    Pinned 0.5.16 prewarm takes chunked_prefill_size as an allocation size, so
+    it cannot run with -1 (our unchunked prefill): the unchanged native kernel
+    is left to compile on its first real forward instead.
+
+    With a positive chunk the native default applies, and an explicit user
+    value is kept. This must be the only place that writes the variable --
+    an unconditional write earlier in main() used to override both the native
+    default and an explicit setting before this decision ran.
+    """
+    if model != "memt-flash" or chunked_prefill_size != -1:
+        return
+    if os.environ.get(MHC_PREWARM, "").strip() not in ("", "1"):
+        # The user already disabled it; leaving their value alone keeps the
+        # startup identity honest about who made the decision.
+        return
+    os.environ[MHC_PREWARM] = "0"
 
 
 def main(argv=None):
@@ -459,11 +477,6 @@ def main(argv=None):
         os.environ["NCCL_ALGO"] = "allreduce:tree"
     # Memory injection uses the native BF16 output projection.
     os.environ["SGLANG_OPT_FP8_WO_A_GEMM"] = "0"
-    if identity["model"] == "memt-flash":
-        # Pinned 0.5.16 MHC prewarm uses chunked_prefill_size as an allocation
-        # size and cannot handle our required -1 (unchunked prefill). Let the
-        # unchanged native kernel compile on its actual first forward instead.
-        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
     os.environ["SGLANG_EXTERNAL_MODEL_PACKAGE"] = "memt_sglang.models"
     os.environ["MEMT_SGLANG_MODEL"] = identity["model"]
     os.environ["MEMT_MODEL_IDENTITY"] = identity["config_sha256"]
@@ -478,7 +491,7 @@ def main(argv=None):
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
-    resolve_mhc_prewarm(args, identity["model"])
+    resolve_mhc_prewarm(identity["model"], args.chunked_prefill_size)
     sync_graph_config(args)
     validate_server_args(
         args,

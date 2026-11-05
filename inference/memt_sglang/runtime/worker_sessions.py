@@ -14,6 +14,7 @@ from memt_sglang.protocol import (
     ReceiptStatus,
     SessionError,
     TransactionStatus,
+    UnknownSessionError,
 )
 from memt_sglang.runtime.config import MAX_TRANSACTION_RECEIPTS
 
@@ -54,7 +55,9 @@ class WorkerSessions:
 
     def require(self, session):
         if session not in self.pool.sessions:
-            raise SessionError("Unknown session; create_session first")
+            # Distinct class: the service drops its tokenizer entry only for
+            # this error, so it must not be reported for a session that exists.
+            raise UnknownSessionError("Unknown session; create_session first")
 
     def has_active_request(self, session):
         return any(
