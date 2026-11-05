@@ -13,6 +13,7 @@ from memt_sglang.protocol import (
     SNAPSHOT_FORMAT,
     CapacityError,
     SessionError,
+    UnknownSessionError,
     validate_boolean,
 )
 from memt_sglang.runtime.config import control_timeout_seconds
@@ -43,9 +44,15 @@ class ControlChannel:
             async with asyncio.timeout(self.timeout):
                 result = await future
             if not result["ok"]:
+                # The worker reports type(error).__name__ (hooks.py). Anything
+                # not named here collapses to SessionError, which silently
+                # erases the one distinction recovery depends on: whether the
+                # session is absent or merely busy. UnknownSessionError must be
+                # mapped explicitly or _recover can never see it over the wire.
                 error_type = {
                     "ValueError": ValueError,
                     "CapacityError": CapacityError,
+                    "UnknownSessionError": UnknownSessionError,
                 }.get(result.get("error_type"), SessionError)
                 raise error_type(result["error"])
             return result["result"]
