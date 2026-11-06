@@ -488,6 +488,22 @@ def main(argv=None):
     from sglang.srt.server_args import prepare_server_args
     from sglang.srt.utils import kill_process_tree
 
+    # The strict tier runs the dsv4 backend under deterministic inference, which
+    # stock's allow-lists exclude. Register it through the dependency's own
+    # extension point instead of editing the list in place: this runs before
+    # prepare_server_args parses, which is where the check happens.
+    if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "").lower() in (
+        "1",
+        "true",
+    ):
+        from sglang.srt.server_args import (
+            add_deterministic_attention_backend_choices,
+            add_radix_supported_deterministic_attention_backend_choices,
+        )
+
+        add_deterministic_attention_backend_choices(["dsv4"])
+        add_radix_supported_deterministic_attention_backend_choices(["dsv4"])
+
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)

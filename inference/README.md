@@ -34,6 +34,32 @@ uv pip install '.[client]'
 
 The `server` extra pins PyTorch 2.11.0, SGLang 0.5.16, Transformers 5.12.1, flashinfer-python[cu13] 0.6.14 and sglang-kernel 0.4.5. The `client` extra requires Transformers without installing PyTorch. The package includes a vendored subset of flash-linear-attention 0.5.2 (MIT).
 
+### Optional SGLang source patches
+
+Three capabilities need code inside SGLang. They are separate patch files,
+applied to a checkout you name — nothing is modified implicitly, and installing
+the wheel never touches an existing SGLang:
+
+| Patch | Needed by | Without it |
+| --- | --- | --- |
+| `patches/sglang-decode-owners.patch` | Flash memory decode graph | Startup refuses the graph (`capture ownership API v1` missing) rather than replaying reclaimed memory |
+| `patches/sglang-stable-topk.patch` | `C4_STABLE_TOPK` | Startup refuses the stable top-k (`API v1` missing); native top-k stays available |
+| `patches/sglang-dsv4-numerics.patch` | `MEMT_NUMERICS=strict` on Flash | The strict tier is unavailable; no code reads its switches |
+
+```bash
+python tools/apply_sglang_patch.py /path/to/sglang decode-owners --apply
+python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --apply
+```
+
+Each file is hash-checked against `patches/manifest.json` before it is applied,
+and each applies independently to the pinned base
+`fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` (0.5.16). The deterministic
+attention-backend allow-list is extended through the dependency's own
+`add_deterministic_attention_backend_choices()`, so that part needs no patch at
+all. These patches are the current delivery mechanism; tracking them as
+reviewable commits on an SGLang fork, pinned by commit or package version, is
+the intended replacement and is not done yet.
+
 Model weights and tokenizer assets are distributed through Hugging Face:
 
 - MemT-1.0-Nano: <https://huggingface.co/MemTensor/MemT-1.0-Nano>
@@ -116,7 +142,7 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_SLOT_READ` | Read state slots directly; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
-| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | Capture read-only memory reads in breakable decode graphs (Nano), or on Flash with the bundled dependency patch; implies slot read and padded decode query. Default `0`. |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | Capture read-only memory reads in breakable decode graphs (Nano), or on Flash with `sglang-decode-owners.patch` applied; implies slot read and padded decode query. Default `0`. |
 | `MEMT_EXPERIMENT_NANO_COMPILE` | Precision-preserving Nano output-normalization fusion and startup tensor warmup; default `0`. |
 | `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | Reuse immutable eager-writer geometry in a bounded, stream-local cache. Holds no session or state data; default `0`. |
 | `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | Read a whole decode batch with padded rows and mask inactive ones; default `0`. |
