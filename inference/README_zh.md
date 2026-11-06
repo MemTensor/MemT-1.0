@@ -110,7 +110,7 @@ Launcher 根据 `config.json` 顶层的 `model_type` 识别模型（Nano 或 Fla
 | `--min-kv-tokens` | 覆盖 `memt_runtime.min_kv_tokens`。 |
 | `--json-model-override-args` | 只接受 `{"memt_runtime": {...}}`；模型结构来自 `config.json`。 |
 | `--state-directory` | 服务端快照目录；导出／导入快照时必须配置。 |
-| `--deterministic-communication` | 为可复现实验选择固定的集合通信设置；不保证整个模型的确定性。 |
+| `--deterministic-communication` | 为可复现实验选择固定的集合通信设置；不保证整个模型的确定性。默认关闭：custom all-reduce 是否更快取决于卡数、互联与消息大小，因此启动脚本不再隐式禁用它。关闭它的对照必须在结果里说明，因为它改变集合通信耗时。 |
 | `--dry-run` | 校验模型和运行时配置，打印启动身份信息及拟传入 SGLang 的参数，不加载 SGLang 或模型权重。 |
 
 例如：
@@ -147,7 +147,7 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | 整个 decode batch 按填充后的行读取并屏蔽非活跃行；默认 `0`。 |
 | `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | 原生 KV 容量被缩减时拒绝启动；默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token，该值是已验证的下限。长于预算的 query 会被切分，被切分的 query 在任何预算下都不与不分块逐位一致。默认 `0`。 |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合正的 `--chunked-prefill-size`，且为原生 page size 的整数倍。两个启动脚本都把它留在 `-1`，因此必须在命令行给出（后出现的同名参数生效）。DP attention 会先把它除以 `dp_size` 再校验：DP4 上要 2048 的预算得传 8192。每 rank 2048 是已验证的下限，更小会被接受但给出告警。长于预算的 query 会被切分，被切分的 query 在任何预算下都不与不分块逐位一致。默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 合并达到该请求数 / 输入 token 数即放行；默认 4 / 4096。 |
 
@@ -188,14 +188,22 @@ Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于
 | --- | --- | --- |
 | `MEMT_EXPERIMENT_SLOT_READ` | `1` | 通过 slot 读取记忆，替代 eager gather |
 | `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | 重放单一 padding 查询形状，而非按 batch 各一档 |
-| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | 稳定精确的 C4 top-k 定序 |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | DSV4 indexer 稳定 top-k：精确且定序确定的 tie 处理 |
 | `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | 让捕获的张量在重放间保持存活 |
 
 用的是 `setdefault`，因此**显式值优先**：`MEMT_EXPERIMENT_C4_STABLE_TOPK=0` 保留原生 top-k
 策略，而原生选择同样可以配合重放使用。选择策略的数值与图指针所有权是两件独立的事。
 
-stable C4 是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
-可能在 C4 选中哪些专家上并不一致，所以四项配套的最终取值都写进启动身份
+**命名**：这里的 `C4` 指压缩倍率为 4 的 KV 路径，是 DSV4 indexer 做 top-k 选择的对象，
+**与专家选择无关**；这个开关更准确的读法是"DSV4 indexer 稳定 top-k"。
+
+**开启该图会做什么、不会做什么**：它会固定上面四项配套，但**不会**固定 MHC 归约的切分数——
+那属于 strict 数值档（`MEMT_NUMERICS=strict`，Flash 上即
+`--enable-deterministic-inference`），是另一个独立决定，也单独记录。未开 strict 档的
+graph-on 运行，切分数仍由原生按 batch 大小决定。
+
+它是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
+可能在 indexer 于分数并列时保留哪些位置上并不一致，所以四项配套的最终取值都写进启动身份
 `execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
 
 **stable C4 的硬件资质**：这套实现只在 B300（compute capability 10.3，`sm_103`）上
