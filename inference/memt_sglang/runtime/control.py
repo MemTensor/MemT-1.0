@@ -13,9 +13,10 @@ from memt_sglang.protocol import (
     SNAPSHOT_FORMAT,
     CapacityError,
     SessionError,
+    UnknownSessionError,
     validate_boolean,
 )
-from memt_sglang.runtime.config import CONTROL_TIMEOUT_SECONDS
+from memt_sglang.runtime.config import control_timeout_seconds
 from memt_sglang.runtime.kv import close_kv, kv_status, open_kv, reset_kv
 from memt_sglang.runtime.snapshots import load_snapshot, save_snapshot
 
@@ -23,9 +24,9 @@ PREFIX = "memt-control-v1:"
 
 
 class ControlChannel:
-    def __init__(self, manager, *, timeout=CONTROL_TIMEOUT_SECONDS):
+    def __init__(self, manager, *, timeout=None):
         self.manager = manager
-        self.timeout = timeout
+        self.timeout = control_timeout_seconds() if timeout is None else timeout
         self.pending = {}
 
     async def call(self, rank, action, **payload):
@@ -43,9 +44,15 @@ class ControlChannel:
             async with asyncio.timeout(self.timeout):
                 result = await future
             if not result["ok"]:
+                # The worker reports type(error).__name__ (hooks.py). Anything
+                # not named here collapses to SessionError, which silently
+                # erases the one distinction recovery depends on: whether the
+                # session is absent or merely busy. UnknownSessionError must be
+                # mapped explicitly or _recover can never see it over the wire.
                 error_type = {
                     "ValueError": ValueError,
                     "CapacityError": CapacityError,
+                    "UnknownSessionError": UnknownSessionError,
                 }.get(result.get("error_type"), SessionError)
                 raise error_type(result["error"])
             return result["result"]
@@ -156,6 +163,14 @@ class WorkerControl:
             **self.sessions.status(session),
             "memory_read": self.sessions.memory_read[session],
         }
+        actual = getattr(self.scheduler, "max_total_num_tokens", None)
+        if actual is not None:
+            allocator = self.scheduler.token_to_kv_pool_allocator
+            result["native_kv_capacity"] = {
+                "full_tokens": actual,
+                "swa_tokens": getattr(allocator, "_size_swa", None),
+                "requested_full_tokens": self.scheduler.server_args.max_total_tokens,
+            }
         if session in self.runtime.kv_sessions:
             result = {**result, "kv": kv_status(self.scheduler, session)}
         return result

@@ -130,8 +130,7 @@ def install_decode_query_guard():
             _record(self, batch, False, ("memt_query_veto",))
             return False
         allowed = original_can_run(self, batch)
-        _record(self, batch, allowed,
-                () if allowed else _decode_reasons(self, batch))
+        _record(self, batch, allowed, () if allowed else _decode_reasons(self, batch))
         return allowed
 
     @wraps(original_execute)
@@ -143,6 +142,14 @@ def install_decode_query_guard():
         success = False
         try:
             result = original_execute(self, batch, *args, **kwargs)
+            manager = getattr(
+                self.model_runner.model._memory_hooks, "memory_decode_graph", None
+            )
+            if manager is not None:
+                captured_layers = {layer for layer, _ in manager.prepared}
+                if captured_layers != set(runtime.pool.storage):
+                    raise RuntimeError("Memory graph does not cover every memory layer")
+                runtime._layers.update(captured_layers)
             if self.model_runner.model._memory_hooks.pending:
                 raise RuntimeError("Decode graph left an unconsumed memory residual")
             success = True
@@ -204,8 +211,6 @@ def install_dp_query_consensus():
 def query_graph_allowed(runtime, batch, phase):
     """A world vote can veto a local query, never turn a local write into one."""
     if not getattr(batch, "_memt_graph_allowed", True):
-        return False
-    if not getattr(batch, "_memt_graph_override", True):
         return False
     rids = batch.rids or []
     if not rids:

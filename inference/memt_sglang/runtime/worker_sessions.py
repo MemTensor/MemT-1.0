@@ -14,6 +14,7 @@ from memt_sglang.protocol import (
     ReceiptStatus,
     SessionError,
     TransactionStatus,
+    UnknownSessionError,
 )
 from memt_sglang.runtime.config import MAX_TRANSACTION_RECEIPTS
 
@@ -54,7 +55,9 @@ class WorkerSessions:
 
     def require(self, session):
         if session not in self.pool.sessions:
-            raise SessionError("Unknown session; create_session first")
+            # Distinct class: the service drops its tokenizer entry only for
+            # this error, so it must not be reported for a session that exists.
+            raise UnknownSessionError("Unknown session; create_session first")
 
     def has_active_request(self, session):
         return any(
@@ -185,6 +188,13 @@ class WorkerSessions:
         }
 
     def reset(self, session, *, close=False):
+        if close and session not in self.pool.sessions:
+            # A close whose acknowledgement was lost is retried against a worker
+            # that already applied it. Repeating the request must reach the same
+            # state, not raise: the tokenizer cannot distinguish "never applied"
+            # from "applied, reply dropped", and refusing here left the session
+            # unrecoverable and its slot reserved for the process lifetime.
+            return
         self.require(session)
         self.fence(session)
         if session in self.transactions:

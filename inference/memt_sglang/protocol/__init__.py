@@ -14,7 +14,13 @@ from .requests import (
     validate_payload,
     validate_session_id,
 )
-from .session import CapacityError, ReceiptStatus, SessionError, TransactionStatus
+from .session import (
+    CapacityError,
+    ReceiptStatus,
+    SessionError,
+    TransactionStatus,
+    UnknownSessionError,
+)
 
 __all__ = [
     "DEFAULT_LEASE_SECONDS",
@@ -30,5 +36,6 @@ __all__ = [
     "CapacityError",
     "ReceiptStatus",
     "SessionError",
+    "UnknownSessionError",
     "TransactionStatus",
 ]

@@ -34,6 +34,28 @@ uv pip install '.[client]'
 
 `server` 可选依赖固定使用 PyTorch 2.11.0、SGLang 0.5.16、Transformers 5.12.1、flashinfer-python[cu13] 0.6.14 和 sglang-kernel 0.4.5。`client` 可选依赖需要 Transformers，不会安装 PyTorch。包内包含 flash-linear-attention 0.5.2 的部分源码，采用 MIT 许可证。
 
+### 可选的 SGLang 源码补丁
+
+三项能力需要在 SGLang 内部改代码。它们是**三个独立补丁文件**，只应用到
+你指定的 checkout——安装 wheel 从不隐式修改已有的 SGLang：
+
+| 补丁 | 谁需要 | 不装会怎样 |
+| --- | --- | --- |
+| `patches/sglang-decode-owners.patch` | Flash memory decode graph | 启动直接拒绝该图（缺 `capture ownership API v1`），而不是去重放已回收的内存 |
+| `patches/sglang-stable-topk.patch` | `C4_STABLE_TOPK` | 启动拒绝稳定 top-k（缺 `API v1`），原生 top-k 仍可用 |
+| `patches/sglang-dsv4-numerics.patch` | Flash 上的 `MEMT_NUMERICS=strict` | strict 档不可用；没有代码读取它的开关 |
+
+```bash
+python tools/apply_sglang_patch.py /path/to/sglang decode-owners --apply
+python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --apply
+```
+
+每个文件在应用前都会与 `patches/manifest.json` 校验哈希，且各自都能独立应用到
+基线 `fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1`（0.5.16）。确定性 attention backend
+的允许列表通过依赖自带的 `add_deterministic_attention_backend_choices()` 扩展，
+这部分不需要补丁。当前交付方式仍是补丁文件；改为 SGLang fork 上可审查的提交、
+以 commit 或包版本固定，是预期的替代方案，尚未完成。
+
 模型权重和 tokenizer 文件通过 Hugging Face 分发：
 
 - MemT-1.0-Nano：<https://huggingface.co/MemTensor/MemT-1.0-Nano>
@@ -116,6 +138,11 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_EXPERIMENT_SLOT_READ` | 按 slot 直接读取状态，默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | 把只读记忆读取纳入 breakable decode graph；Nano 直接可用，Flash 需要先应用 `sglang-decode-owners.patch`。隐含 slot read 与 padded decode query。默认 `0`。 |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | 保留精度的 Nano 输出归一化融合与启动预热，默认 `0`。 |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | 复用不可变的 eager writer 几何，缓存有界且按 stream 隔离，不含会话或状态内容；默认 `0`。 |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | 整个 decode batch 按填充后的行读取并屏蔽非活跃行；默认 `0`。 |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | 原生 KV 容量被缩减时拒绝启动；默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token。默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |
@@ -148,6 +175,28 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 - Flash prefill graph 与 query 合并：attention TP1（`tp_size == dp_size == ep_size`，DP ≥ 2），显式传入 `--dp-size`，PP1，A2A `none`，关闭 overlap。
 
 Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于推荐配置。
+
+### Memory decode graph 的开关联动
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` 不是一个独立开关。未显式设置时，启动器会自动补齐
+四项配套，因为重放记忆读取的图需要它们同时成立：
+
+| 配套开关 | 图开启时的默认 | 作用 |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | 通过 slot 读取记忆，替代 eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | 重放单一 padding 查询形状，而非按 batch 各一档 |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | 稳定精确的 C4 top-k 定序 |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | 让捕获的张量在重放间保持存活 |
+
+用的是 `setdefault`，因此**显式值优先**：`MEMT_EXPERIMENT_C4_STABLE_TOPK=0` 保留原生 top-k
+策略，而原生选择同样可以配合重放使用。选择策略的数值与图指针所有权是两件独立的事。
+
+stable C4 是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
+可能在 C4 选中哪些专家上并不一致，所以四项配套的最终取值都写进启动身份
+`execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
+
+该图还要求 decode 后端为 breakable 且关闭 overlap 调度；不兼容组合会在任何 worker 启动前
+被启动器拒绝。
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 
