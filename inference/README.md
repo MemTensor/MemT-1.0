@@ -136,6 +136,8 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_PYTHON` | Python executable used by the startup scripts; default `python`. |
 | `MEMT_PORT` | Startup script port; default `30000`. |
 | `MEMT_STATE_DIRECTORY` | Startup script snapshot directory; default `./memt-state`. |
+| `MEMT_TP_SIZE` / `MEMT_EP_SIZE` / `MEMT_DP_SIZE` | Parallel layout used by the startup script; defaults are listed above. Flash needs attention TP equal to 1, so TP, EP and DP move together; a layout that does not match `CUDA_VISIBLE_DEVICES` fails during NCCL init. |
+| `MEMT_CUSTOM_ALL_REDUCE_DISABLED` | Non-empty appends `--disable-custom-all-reduce`. It is not appended by default: whether it is faster depends on device count, interconnect and message size, so it is not a universal win. |
 | `MEMT_API_KEY` | API key read by the CLI and supplied examples, sent as `Authorization: Bearer ...`. This does not configure the server's API key. |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | Must remain disabled; enabling it is rejected at startup. |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | Reuse token/slot metadata across memory layers; default `1`. |
@@ -202,6 +204,14 @@ reporting "memory decode graph on" can disagree on which experts C4 selects, so
 the resolved values of all four companions appear in the launch identity under
 `execution.memory_decode_graph`. Report them alongside any performance or
 accuracy number produced with the graph enabled.
+
+**Hardware qualification for stable C4.** This implementation is measured only
+on B300 (compute capability 10.3, `sm_103`); other architectures are **not
+qualified**. It is not pure Python: the bundled patch supplies a fixed-width
+kernel symbol, `topk_transform_512_stable`, so `index_topk` must be 512, and a
+missing symbol or API version makes startup refuse (`runtime/stable_c4.py`).
+Confirm the symbol exists on the target device before enabling it; a result from
+an unqualified architecture cannot be compared in the same table as these arms.
 
 The graph also requires a breakable decode backend. Native phase overlap is
 permitted: each rank still submits its forward to one ordered stream, and the

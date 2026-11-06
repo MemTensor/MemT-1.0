@@ -83,6 +83,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | --- | --- | --- |
 | `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` |
 | TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 |
+| 拓扑覆盖变量 | `MEMT_TP_SIZE`（EP/DP 默认 1） | `MEMT_TP_SIZE`（EP/DP 跟随 TP） |
 | 每 rank 会话数 / 并发提交数 | 6 / 2 | 6 / 1 |
 | 最小 KV token 数 | 2048 | 2048 |
 | 最大 prefill token 数 | 16384 | 16384 |
@@ -132,6 +133,8 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_PYTHON` | 启动脚本使用的 Python 可执行文件，默认 `python`。 |
 | `MEMT_PORT` | 启动脚本的服务端口，默认 `30000`。 |
 | `MEMT_STATE_DIRECTORY` | 启动脚本的快照目录，默认 `./memt-state`。 |
+| `MEMT_TP_SIZE` / `MEMT_EP_SIZE` / `MEMT_DP_SIZE` | 启动脚本的并行拓扑，默认值见上表。Flash 的 attention TP 必须为 1，所以 TP/EP/DP 三者要一起改；拓扑与 `CUDA_VISIBLE_DEVICES` 的卡数不符时会卡在 NCCL 初始化。 |
+| `MEMT_CUSTOM_ALL_REDUCE_DISABLED` | 设为非空时启动脚本追加 `--disable-custom-all-reduce`。默认不追加，因为该选项是否更快取决于卡数、互联与消息大小，不属于通用最优。 |
 | `MEMT_API_KEY` | CLI 和示例读取的 API key，以 `Authorization: Bearer ...` 发送；该变量不配置服务端的 API key。 |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | 跨记忆层复用 token/slot 元数据，默认 `1`。 |
@@ -194,6 +197,12 @@ Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于
 stable C4 是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
 可能在 C4 选中哪些专家上并不一致，所以四项配套的最终取值都写进启动身份
 `execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
+
+**stable C4 的硬件资质**：这套实现只在 B300（compute capability 10.3，`sm_103`）上
+实测通过，其他架构**未经资质认定**。它并非纯 Python 逻辑：附带补丁提供
+`topk_transform_512_stable` 这一宽度固定的内核符号，`index_topk` 必须是 512，
+符号或 API 版本缺失时启动会直接拒绝（`runtime/stable_c4.py`）。换机器前先在目标卡上
+确认该符号存在，再判断能否开启；在未认定的架构上开启，得到的结果不能与其他臂并列比较。
 
 该图还要求 decode 后端为 breakable。**原生 phase overlap 允许共存**：每个 rank 的前向仍然
 提交到同一条有序 stream，图在运行时固定它重放所用的 stream，一旦后续步骤换到别的 stream
