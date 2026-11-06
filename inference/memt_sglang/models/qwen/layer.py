@@ -23,6 +23,18 @@ class MemTRMSNormGated(nn.Module):
         self.output_gate_softcap_limit = float(output_gate_softcap_limit)
 
     def forward(self, hidden_states, gate):
+        from memt_sglang.runtime.features import enabled
+
+        if enabled("NANO_COMPILE"):
+            from .ops.compiled_tensor_ops import resolve_gated_rms_norm
+
+            return resolve_gated_rms_norm()(
+                hidden_states,
+                gate,
+                self.weight,
+                self.variance_epsilon,
+                self.output_gate_softcap_limit,
+            )
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
@@ -124,6 +136,8 @@ class QwenMemoryBlock(nn.Module):
             # Read fixed snapshots with the released tiled reduction order.
             # Preserve QKV GEMM layout; a q-only GEMM can change rounding.
             q = l2norm(q.contiguous())
+            # Queries only need immutable reader tiles, not write-event metadata.
+            # Cache by CPU lengths and CUDA stream, preserving the reader kernel.
             plan = query_plan(lengths, hidden_states.device)
             read = memt_gdn2_read_fwd(
                 q, read_states, plan, self.read_scale, out_dtype=v.dtype
@@ -151,6 +165,10 @@ class QwenMemoryBlock(nn.Module):
         )
         output = self.o_norm(read.reshape(-1, dim), output_gate.reshape(-1, dim))
         return output.view(len(hidden_states), self.value_dim), next_state
+
+    def query_capture_constants(self, lengths):
+        """Strong graph owners outlive the bounded per-stream plan cache."""
+        return (query_plan(lengths, self.in_proj.weight.device),)
 
     @torch.no_grad()
     def packed_query_slots(

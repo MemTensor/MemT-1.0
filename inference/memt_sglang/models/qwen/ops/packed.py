@@ -8,6 +8,7 @@ from memt_sglang._vendor.fla.ops.utils.cumsum import chunk_local_cumsum
 from memt_sglang._vendor.fla.utils import input_guard
 from memt_sglang.models.common.constants import WY_TILE_TOKENS
 from memt_sglang.models.common.packed import boundaries
+from memt_sglang.models.common.plan_cache import writer_plan
 from memt_sglang.models.qwen.ops._triton.state import memt_gdn2_fwd_h
 from memt_sglang.models.qwen.ops.layout import build_chunk_plan
 from memt_sglang.models.qwen.ops.read import memt_gdn2_read_fwd
@@ -46,7 +47,7 @@ def token_memory_packed(
     scale,
     chunk_tokens,
 ):
-    plan = packed_plan(lengths, q.device, chunk_tokens=chunk_tokens)
+    plan = writer_plan(packed_plan, lengths, q.device, chunk_tokens=chunk_tokens)
     cumulative_decay = chunk_local_cumsum(
         g=log_decay,
         scale=RCP_LN2,

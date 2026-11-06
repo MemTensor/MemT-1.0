@@ -15,6 +15,18 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
     """Native backbone names plus the published MemT memory parameter names."""
 
     def __init__(self, config, quant_config=None, prefix=""):
+        from memt_sglang.runtime.features import enabled
+
+        if enabled("MEMORY_DECODE_GRAPH"):
+            # DSV4 rebinds its per-layer intermediates every step and the stock
+            # breakable backend weak-references captured tensors, so the mempool
+            # would hand a later segment storage that has been reclaimed. The
+            # bundled dependency patch retains them; without it this capture has
+            # no correct lifetime and would replay stale values silently.
+            raise ValueError(
+                "Flash memory decode graph requires the bundled SGLang patch "
+                "(captured tensor ownership); apply patches/sglang-memory-graph.patch"
+            )
         self._memory_config = config.memory_config
         self._memory_loaded = False
         super().__init__(config, quant_config=quant_config, prefix=prefix)
