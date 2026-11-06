@@ -240,9 +240,10 @@ def sync_graph_config(args):
                 "Memory decode graph requires breakable decode and SLOT_READ=1"
             )
         # Native CPU/GPU schedule overlap still submits each rank's work to one
-        # ordered forward stream, so it is compatible with replay: the graph pins
-        # the stream it was captured on and refuses to run on another. PDMux is a
-        # different execution model -- concurrent streams, not ordered ones.
+        # ordered forward stream, so it is compatible with replay: the graph
+        # latches the stream of its first replay and refuses to continue on a
+        # different one. PDMux is a different execution model -- concurrent
+        # streams, not one ordered stream.
         if getattr(args, "enable_pdmux", False):
             raise ValueError(
                 "Memory decode graph does not support concurrent PDMux streams"

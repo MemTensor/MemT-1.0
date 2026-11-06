@@ -203,8 +203,13 @@ the resolved values of all four companions appear in the launch identity under
 `execution.memory_decode_graph`. Report them alongside any performance or
 accuracy number produced with the graph enabled.
 
-The graph also requires a breakable decode backend with overlap scheduling off;
-the launcher rejects incompatible combinations before any worker starts.
+The graph also requires a breakable decode backend. Native phase overlap is
+permitted: each rank still submits its forward to one ordered stream, and the
+graph enforces that at run time by latching the stream it replays on and refusing
+to continue if a later step runs on a different one. PDMux remains rejected,
+because it runs concurrent streams rather than one ordered stream. Overlap on/off
+is recorded in `execution.prefill_overlap` and `execution.decode_overlap`, so an
+arm cannot be described as graph-on while its overlap setting differs.
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 

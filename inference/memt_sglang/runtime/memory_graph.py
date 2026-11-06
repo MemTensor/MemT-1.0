@@ -99,9 +99,10 @@ class MemoryDecodeGraph:
         # One shared device slot buffer is only safe while the upload copy and
         # the graph's read of it stay ordered, which holds on a single stream --
         # including native schedule overlap, where each rank still submits to one
-        # ordered forward stream. Concurrent streams would need separate replay
-        # storage, not a configuration bypass, so pin the stream and refuse to
-        # let it change rather than silently racing.
+        # ordered forward stream. The pinned host buffer is reused once its copy
+        # event completes, and that event orders against the stream that recorded
+        # it, so a second stream would need its own replay storage. Latch the
+        # replay stream and refuse a change rather than silently race.
         stream = torch.cuda.current_stream(self.slots.device)
         if self._replay_stream is None:
             self._replay_stream = stream
