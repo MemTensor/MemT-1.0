@@ -98,7 +98,20 @@ class MemoryHooks:
             self.memory_decode_graph = MemoryDecodeGraph(self)
             install_memory_capture()
 
-        if enabled("QUERY_CHUNKS"):
+        from memt_sglang.runtime.features import commit_chunk_policy
+
+        if commit_chunk_policy() != "atomic":
+            # The partial scheduler owns admission; the atomic commit guard is
+            # its serialized counterpart and the two must not both install.
+            if not enabled("PARTIAL_NATIVE_REFERENCE"):
+                from memt_sglang.runtime.partial_scheduler import (
+                    install_partial_prefill,
+                )
+
+                install_partial_prefill(
+                    chunk_tokens=next(iter(self.blocks.values())).chunk_tokens
+                )
+        elif enabled("QUERY_CHUNKS"):
             from memt_sglang.runtime.query_chunks import install_atomic_commit_guard
 
             install_atomic_commit_guard()

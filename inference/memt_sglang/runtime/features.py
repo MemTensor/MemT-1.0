@@ -29,20 +29,41 @@ def enabled(name, *, environment=None):
     return value == "1"
 
 
+COMMIT_CHUNK_POLICIES = ("atomic", "global", "tail")
+
+
 def commit_chunk_policy(*, environment=None):
-    """Reject requests for an extension that this core package does not install."""
+    """How a commit's token stream is split across native prefill fragments.
+
+    `atomic` is the default and the only policy with a private candidate slot per
+    transaction. `global` and `tail` admit a commit in fragments, which needs a
+    replay base so a retraction can rewind to the pre-commit state.
+    """
     environment = os.environ if environment is None else environment
     policy = environment.get("MEMT_EXPERIMENT_COMMIT_CHUNK_POLICY", "atomic")
-    if policy != "atomic":
+    if policy not in COMMIT_CHUNK_POLICIES:
         raise ValueError(
-            "Continuous commit scheduling is provided by the separate global/tail extension"
+            f"MEMT_EXPERIMENT_COMMIT_CHUNK_POLICY must be one of {COMMIT_CHUNK_POLICIES}"
         )
     return policy
 
 
 def candidate_slots_per_transaction():
-    """The atomic writer uses one private transaction candidate."""
-    return 1
+    """A non-atomic commit also needs a replay base beside its candidate."""
+    return 1 if commit_chunk_policy() == "atomic" else 2
+
+
+def partial_decode_quanta(*, environment=None):
+    """Decode steps granted after a prefill round that carried a commit fragment.
+
+    An operator fairness budget, not a tensor shape or a capacity limit: a parked
+    commit can otherwise re-enter admission immediately and starve decode.
+    """
+    environment = os.environ if environment is None else environment
+    value = environment.get("MEMT_PARTIAL_DECODE_QUANTA", "0")
+    if not value.isdecimal():
+        raise ValueError("MEMT_PARTIAL_DECODE_QUANTA must be a nonnegative integer")
+    return int(value)
 
 
 # Numerics tiers, the Flash capture-ownership gate and the stable-C4
@@ -226,6 +247,12 @@ def sync_graph_config(args):
                 f"MemT {phase} graph requires disabled or breakable backend"
             )
     args.cuda_graph_config = replace(graph, **phases)
+    # The partial scheduler drives admission itself, so the prefill graph's
+    # captured shapes would answer a decision it no longer makes.
+    if commit_chunk_policy() != "atomic" and phases["prefill"].backend != "disabled":
+        raise ValueError(
+            "Partial commit requires eager prefill; decode graph remains supported"
+        )
     os.environ.update(
         {
             "MEMT_EXPERIMENT_" + phase.upper() + "_GRAPH": "1"
@@ -286,9 +313,24 @@ def validate_graphs(args):
             )
 
 
-def validate_query_chunks(args):
+def validate_query_chunks(args, *, chunk_tokens=None):
     """Query budgets follow native page geometry, not memory write-event size."""
     chunk = getattr(args, "chunked_prefill_size", None)
+    policy = commit_chunk_policy()
+    if policy != "atomic":
+        # A tail commit keeps whole write-event blocks, so the native budget has
+        # to hold one; `global` fragments at page granularity instead.
+        if policy == "tail" and (type(chunk_tokens) is not int or chunk_tokens < 1):
+            raise ValueError(
+                "Tail scheduling requires resolved memory write-event geometry"
+            )
+        if type(chunk) is not int or chunk < (chunk_tokens if policy == "tail" else 1):
+            raise ValueError("Partial commit requires a positive native token budget")
+        if any(overlap_phases()) or not args.disable_overlap_schedule:
+            raise ValueError("Partial commit requires serialized scheduler execution")
+        if args.enable_dynamic_chunking or args.schedule_policy != "fcfs":
+            raise ValueError("MemT partial commit uses its own FCFS chunk admission")
+        return
     if type(chunk) is int and chunk == -1:
         return
     if type(chunk) is not int or chunk <= 0 or not enabled("QUERY_CHUNKS"):
@@ -354,7 +396,18 @@ def execution_identity(args):
         padded_decode_query=enabled("PADDED_DECODE_QUERY"),
         require_native_kv_capacity=enabled("REQUIRE_NATIVE_KV_CAPACITY"),
         commit_chunk_policy=commit_chunk_policy(),
-        commit_semantics_version="atomic-fresh-kv-v1",
+        # Atomic and fragmented commits do not promise the same state: a
+        # fragment boundary that is not a native write-event boundary splits the
+        # decay segmentation, so the version has to travel with the identity.
+        commit_semantics_version=(
+            "atomic-fresh-kv-v1"
+            if commit_chunk_policy() == "atomic"
+            else "partial-continuous-kv-private-fragment-read-v1"
+        ),
+        candidate_slots_per_transaction=candidate_slots_per_transaction(),
+        partial_decode_quanta=partial_decode_quanta(),
+        partial_query_first=os.environ.get("MEMT_PARTIAL_QUERY_FIRST", "0") == "1",
+        partial_native_reference=enabled("PARTIAL_NATIVE_REFERENCE"),
         prefill_overlap=prefill,
         decode_overlap=decode,
         query_coalescing=asdict(coalescing) if coalescing else None,
