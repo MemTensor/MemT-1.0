@@ -67,6 +67,45 @@ def resolve_grouped_qkv_expansion():
     )
 
 
+def expand_read_query(q, q_norm, q_up, q_eps):
+    """Expand only Q for a snapshot read, retaining the BF16 latent boundary."""
+    return F.linear(_latent_norm(q, q_norm, q_eps), q_up)
+
+
+@cache
+def resolve_read_query_expansion():
+    return torch.compile(
+        expand_read_query,
+        dynamic=True,
+        fullgraph=True,
+        options={"emulate_precision_casts": True},
+    )
+
+
+def expand_read_output_gate(latent, weight, bias):
+    return F.linear(latent, weight, bias)
+
+
+@cache
+def resolve_read_output_gate():
+    return torch.compile(
+        expand_read_output_gate,
+        dynamic=True,
+        fullgraph=True,
+        options={"emulate_precision_casts": True},
+    )
+
+
+def normalize_read_query(q):
+    work = q.float() if q.dtype in (torch.float16, torch.bfloat16) else q
+    return l2norm(work).to(q.dtype)
+
+
+@cache
+def resolve_read_query_normalization():
+    return torch.compile(normalize_read_query, dynamic=True, fullgraph=True)
+
+
 def expand_write_gates(
     erase,
     write,
