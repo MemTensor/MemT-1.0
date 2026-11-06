@@ -311,7 +311,12 @@ def validate_query_chunks(args, *, chunk_tokens=None):
                 "Tail scheduling requires resolved memory write-event geometry"
             )
         if type(chunk) is not int or chunk < (chunk_tokens if policy == "tail" else 1):
-            raise ValueError("Partial commit requires a positive native token budget")
+            # `chunk` has already been divided by dp_size (server_args.py), so a
+            # tail commit on DP attention needs chunk_tokens * dp_size at launch.
+            raise ValueError(
+                "Partial commit requires a positive native token budget; the "
+                f"value here is {chunk!r} after the DP-attention division"
+            )
         if any(overlap_phases()) or not args.disable_overlap_schedule:
             raise ValueError("Partial commit requires serialized scheduler execution")
         if args.enable_dynamic_chunking or args.schedule_policy != "fcfs":

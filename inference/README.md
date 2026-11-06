@@ -113,7 +113,7 @@ The launcher identifies the model (Nano or Flash) from the top-level `model_type
 | `--min-kv-tokens` | Override `memt_runtime.min_kv_tokens`. |
 | `--json-model-override-args` | Accepts only `{"memt_runtime": {...}}`; model structure comes from `config.json`. |
 | `--state-directory` | Server-owned snapshot directory; required for export/import. |
-| `--deterministic-communication` | Select fixed collective settings for reproducibility experiments; this does not guarantee whole-model determinism. |
+| `--deterministic-communication` | Select fixed collective settings for reproducibility experiments; this does not guarantee whole-model determinism. Default off: whether custom all-reduce is faster depends on device count, interconnect and message size, so the startup scripts no longer disable it implicitly. A comparison that turns it off must say so, since it moves collective timings. |
 | `--dry-run` | Validate the model/runtime configuration and print the launch identity and proposed SGLang arguments without loading SGLang or model weights. |
 
 For example:
@@ -150,7 +150,7 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | Read a whole decode batch with padded rows and mask inactive ones; default `0`. |
 | `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | Fail startup when native KV capacity is clipped below the requested value; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires a positive `--chunked-prefill-size` that is a whole multiple of the native page size. Both scripts leave the value at `-1`, so it must be supplied on the command line (later flags win). DP attention divides it by `dp_size` before validation, so a 2048 budget on DP4 must be passed as 8192. Default `0`. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release a coalesced batch at this many requests / input tokens; defaults 4 / 4096. |
 
@@ -192,15 +192,25 @@ memory read needs all of them:
 | --- | --- | --- |
 | `MEMT_EXPERIMENT_SLOT_READ` | `1` | Reads memory through slots instead of the eager gather |
 | `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | Replays one padded query shape instead of a shape per batch |
-| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | Stable exact C4 top-k tie ordering |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | DSV4 indexer stable top-k: exact, deterministically ordered tie-breaking |
 | `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | Keeps captured tensors alive across replays |
 
 `setdefault` is used, so an explicit value wins: `MEMT_EXPERIMENT_C4_STABLE_TOPK=0`
 keeps the native top-k policy, and native selection remains usable with replay.
 Selection numerics and graph pointer ownership are independent decisions.
 
-Stable C4 is a **selection policy**, not an implementation detail. Two runs both
-reporting "memory decode graph on" can disagree on which experts C4 selects, so
+**What the graph does and does not imply.** Enabling it fixes the four
+companions above. It does **not** fix the MHC reduction splits: those belong to
+the strict numerics tier (`MEMT_NUMERICS=strict`, i.e.
+`--enable-deterministic-inference` on Flash), which is a separate decision and is
+recorded separately. A graph-on run without the strict tier still lets native
+pick the split count from batch size.
+
+**Naming.** `C4` here is the compressed KV path (compression ratio 4) that the
+DSV4 indexer top-k selects over. It has nothing to do with expert selection, and
+the switch is better read as "DSV4 indexer stable top-k". It is a **selection
+policy**, not an implementation detail: two runs both reporting "memory decode
+graph on" can disagree on which positions the indexer keeps when scores tie, so
 the resolved values of all four companions appear in the launch identity under
 `execution.memory_decode_graph`. Report them alongside any performance or
 accuracy number produced with the graph enabled.
