@@ -10,6 +10,9 @@ from memt_sglang.models.deepseek.ops.compiled_tensor_ops import (
     resolve_gated_rms_norm,
     resolve_grouped_qkv_expansion,
     resolve_head_expansion,
+    resolve_read_output_gate,
+    resolve_read_query_expansion,
+    resolve_read_query_normalization,
     resolve_stable_qk,
 )
 from memt_sglang.models.deepseek.ops.packed import token_memory_packed
@@ -151,6 +154,26 @@ class DeepSeekMemoryBlock(nn.Module):
             for projection_output in outputs
         )
 
+    def _project_query(self, hidden_states):
+        """Snapshot reads need Q and the output gate, but no writer K/V or gates.
+
+        Keep the full packed input projection and its latent views so the Q and
+        output-gate GEMMs see the same strides and BF16 boundaries as the writer.
+        This deliberately leaves input-projection slicing to a separate change.
+        """
+        parts = self.in_proj(hidden_states.unsqueeze(0)).split(
+            (*self.qkv_rows, *self.gate_rows), dim=-1
+        )
+        query = resolve_read_query_expansion()(
+            parts[0], self.q_norm.weight, self.q_up.weight[:], self.q_norm.eps
+        )
+        output_gate = resolve_read_output_gate()(
+            parts[-1], self.g_down.weight[:], self.g_down.bias[:]
+        )
+        shape = (1, len(hidden_states), self.num_heads, self.head_dim)
+        query = resolve_read_query_normalization()(query.reshape(shape))
+        return query, output_gate.reshape(shape)
+
     @torch.no_grad()
     def packed(self, hidden_states, read_states, *, lengths, commit, write_states):
         validate_packed_inputs(self, hidden_states, read_states, write_states, lengths)
@@ -213,9 +236,9 @@ class DeepSeekMemoryBlock(nn.Module):
         commit,
         write_states,
     ):
-        q, k, v, output_gate, erase, write, log_decay = self._project(hidden_states)
-        query, key = self._prepare_qk(q, k, erase)
         if commit:
+            q, k, v, output_gate, erase, write, log_decay = self._project(hidden_states)
+            query, key = self._prepare_qk(q, k, erase)
             read, next_state = token_memory_packed(
                 query,
                 key,
@@ -229,6 +252,7 @@ class DeepSeekMemoryBlock(nn.Module):
                 chunk_tokens=self.chunk_tokens,
             )
         else:
+            query, output_gate = self._project_query(hidden_states)
             read = packed_snapshot_read(query, read_states, lengths, self.read_scale)
             next_state = None
         return self.o_norm(read, output_gate).reshape(
