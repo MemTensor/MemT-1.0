@@ -41,6 +41,15 @@ class MemoryRuntime:
             for rid in (forward_batch.rids or [])
         ]
         plan = StepPlan.from_batch(batch)
+        # Before any layer writes: a retracted fragment restores its replay base
+        # here, and a replayed or skipped fragment is refused before mutation.
+        for sample in plan.samples:
+            if sample.request.operation == "commit":
+                self.worker_sessions.prepare_span(
+                    sample.request.rid,
+                    sample.prefix_length,
+                    sample.stop - sample.start,
+                )
         self.plan = plan
         return plan
 
@@ -205,6 +214,7 @@ class MemoryRuntime:
                     self.worker_sessions.advance(
                         sample.request.rid,
                         sample.stop - sample.start,
+                        prefix=sample.prefix_length,
                     )
         finally:
             self.plan = None

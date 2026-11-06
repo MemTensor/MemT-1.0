@@ -122,6 +122,41 @@ class WorkerControl:
         self.sessions.begin(session, envelope["transaction"])
 
     def _prepare(self, envelope):
+        from memt_sglang.protocol import MemoryRequest
+        from memt_sglang.runtime.features import commit_chunk_policy
+        from memt_sglang.runtime.partial_scheduler import partial_swa_floor
+        from memt_sglang.runtime.plan import commit_block_tokens
+
+        request = MemoryRequest.from_rid(envelope["request_id"])
+        policy = commit_chunk_policy()
+        if request.operation == "commit" and policy != "atomic":
+            # A parked fragment holds full logical KV credits for the whole
+            # ingest, so refuse up front rather than stalling mid-commit.
+            reserve = int(os.environ.get("MEMT_PARTIAL_QUERY_TOKEN_RESERVE", "4096"))
+            needed = request.length + self.scheduler.page_size + reserve
+            full = self.scheduler.max_total_num_tokens
+            swa = getattr(self.scheduler, "swa_tokens_per_layer", None)
+            tree = self.scheduler.tree_cache
+            # A tree without a window is not hybrid-SWA; asking it for one would
+            # turn a legal commit into a TypeError inside the control channel.
+            window = getattr(tree, "sliding_window_size", None)
+            swa_needed = (
+                partial_swa_floor(
+                    policy,
+                    1,
+                    window,
+                    self.scheduler.page_size,
+                    reserve,
+                    chunk_tokens=commit_block_tokens(),
+                )
+                if swa is not None and swa > 0 and type(window) is int and window > 0
+                else 0
+            )
+            if needed > full or (swa_needed and swa_needed > swa):
+                raise CapacityError(
+                    "Logical commit cannot fit full KV credits or SWA window/step "
+                    "headroom; increase capacity or lower context/chunk budget"
+                )
         self.sessions.prepare(
             envelope["request_id"],
             envelope.get("transaction"),
