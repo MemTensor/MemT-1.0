@@ -195,8 +195,11 @@ stable C4 是**选择策略**，不是实现细节。两次都标称开启了 me
 可能在 C4 选中哪些专家上并不一致，所以四项配套的最终取值都写进启动身份
 `execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
 
-该图还要求 decode 后端为 breakable 且关闭 overlap 调度；不兼容组合会在任何 worker 启动前
-被启动器拒绝。
+该图还要求 decode 后端为 breakable。**原生 phase overlap 允许共存**：每个 rank 的前向仍然
+提交到同一条有序 stream，图在运行时固定它重放所用的 stream，一旦后续步骤换到别的 stream
+就拒绝继续。PDMux 仍然被拒绝，因为它跑的是并发 stream，而不是一条有序 stream。
+overlap 的开关状态记录在 `execution.prefill_overlap` 与 `execution.decode_overlap` 里，
+因此不能把一个 overlap 设置不同的臂描述成「graph on」。
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 
