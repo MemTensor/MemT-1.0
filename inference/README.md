@@ -249,9 +249,20 @@ grows with tokens. Fixed benefit over growing cost crosses over between 1024 and
 
 Capture **512/1024** and let longer prompts fall back to eager. The fallback is
 not free — its DP admission vote measured 131.6 → 138.7 ms at 2048 (+5.4%) — but
-it is far cheaper than replaying. Making long prefills faster needs fewer
-collectives or prefill/decode overlap, not more graph coverage; a trace of the
-Flash prefill puts 15.6 s of kernel time in AllGather alone.
+it is far cheaper than replaying. Making long prefills faster is not a matter of
+graph coverage. Both candidate directions were measured:
+
+- **Fewer collectives.** The structure is real — the prefill MoE path takes the
+  `_use_tp_moe_gather` branch of `_run_moe_ffn_dp_sync`, so every one of the 43
+  MoE layers runs one DP gather and one combine. But the available saving is
+  small: `SGLANG_DP_USE_GATHERV=1` measured 536.3 → 532.7 ms TTFT at 4096 tokens
+  (−0.7%, C4) and 270.5 → 267.5 ms at C1 (−1.1%), both inside the spread. Under
+  SUM_LEN the gathered buffer already holds exactly the real rows, so there is no
+  zero tail to remove and only the algorithm factor remains.
+- **Prefill/decode overlap.** This one works. Enabling the native overlap
+  scheduler takes a 4096-token prompt at concurrency 8 from 2018.5 to 1792.3 ms
+  TTFT (−11.2%), 20.27 to 15.63 ms TPOT (−22.9%) and 246.1 to 308.9 output tok/s
+  (+25.5%). At concurrency 1 there is no window to fill, so it does nothing.
 
 The graph also requires a breakable decode backend. Native phase overlap is
 permitted: each rank still submits its forward to one ordered stream, and the
