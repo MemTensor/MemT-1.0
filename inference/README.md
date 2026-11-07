@@ -223,6 +223,27 @@ missing symbol or API version makes startup refuse (`runtime/stable_c4.py`).
 Confirm the symbol exists on the target device before enabling it; a result from
 an unqualified architecture cannot be compared in the same table as these arms.
 
+### Flash prefill graph: which gears pay off
+
+Measured on 4x B300 with the decode graph on in both arms, concurrency 1:
+
+| Prompt | Prefill graph off | Prefill graph on | TTFT | TPOT |
+| --- | --- | --- | --- | --- |
+| 512 tokens | 129.5 ms | **87.0 ms** | **−32.8%** | unchanged (15.44 → 15.48) |
+| 4096 tokens | 197.7 ms | 370.7 ms | +87.5% | unchanged (16.37 → 16.04) |
+
+Both directions are stable across rounds (per-round spread under 2%), and the
+committed memory state is bitwise identical either way (20 layers,
+`max|diff| = 0.000e+00`), so this is a launch-structure change, not a numeric one.
+
+Replay helps where it removes launch overhead and hurts where prefill is
+collective-bound: a 4096-token prefill spends its time inside NCCL, and replay
+serializes what eager could overlap. The recommended ladder is therefore
+**512/1024**. Capturing only those gears costs nothing at 4096: the long prompt
+falls back to eager by native's own rule and lands at 200.4 ms, i.e. the same as
+running with the graph off. 4096 remains a selectable gear — it is a supported
+native shape — but it is not a gear to capture for speed on this hardware.
+
 The graph also requires a breakable decode backend. Native phase overlap is
 permitted: each rank still submits its forward to one ordered stream, and the
 graph enforces that at run time by latching the stream it replays on and refusing
