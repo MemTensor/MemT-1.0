@@ -15,9 +15,40 @@ class MemTDeepseekV4ForCausalLM(NativeDeepseekV4):
     """Native backbone names plus the published MemT memory parameter names."""
 
     def __init__(self, config, quant_config=None, prefix=""):
+        from memt_sglang.runtime.features import enabled
+
+        if enabled("C4_STABLE_TOPK"):
+            # Stable selection is an optional reference policy. Native top-k
+            # remains usable with capture when the operator selects it.
+            from memt_sglang.runtime.stable_c4 import STABLE_TOPK_WIDTH
+            from memt_sglang.runtime.stable_c4 import install as install_stable_c4
+
+            # The fallback is the width stable_c4 itself ships a kernel for, so a
+            # config without index_topk and the installer agree by construction
+            # instead of by two copies of the same literal.
+            width = getattr(config, "index_topk", None)
+            install_stable_c4(
+                {"index_topk": STABLE_TOPK_WIDTH if width is None else width}
+            )
+        if enabled("MEMORY_DECODE_GRAPH"):
+            from sglang.srt.runtime_context import get_server_args
+
+            from memt_sglang.runtime.features import (
+                require_flash_capture_owners,
+                validate_flash_decode_graph,
+            )
+
+            validate_flash_decode_graph(get_server_args())
+            require_flash_capture_owners()
         self._memory_config = config.memory_config
         self._memory_loaded = False
         super().__init__(config, quant_config=quant_config, prefix=prefix)
+        if enabled("MEMORY_DECODE_GRAPH") and not getattr(
+            self.model, "_pin_decode_graph_owners", False
+        ):
+            raise ValueError(
+                "Flash graph tensor ownership is disabled in the native model"
+            )
         self.memt_state_shapes = self._memory_config.state_shapes
 
     def load_weights(self, weights, is_nextn=False):

@@ -6,6 +6,7 @@ from math import prod
 import torch
 
 from memt_sglang.protocol import CapacityError, SessionError
+from memt_sglang.runtime.features import candidate_slots_per_transaction
 
 
 def state_bytes_per_session(layer_shapes: Mapping[int, tuple[int, ...]]) -> int:
@@ -44,7 +45,8 @@ class StatePool:
         self.max_sessions = max_sessions_per_rank
         self.max_commits = max_inflight_commits_per_rank
         # One published slot per session and one candidate slot per transaction.
-        count = self.max_sessions + self.max_commits
+        self.slots_per_transaction = candidate_slots_per_transaction()
+        count = self.max_sessions + self.max_commits * self.slots_per_transaction
         self.storage = {
             layer: torch.zeros((count, *shape), dtype=torch.float32, device=device)
             for layer, shape in layer_shapes.items()

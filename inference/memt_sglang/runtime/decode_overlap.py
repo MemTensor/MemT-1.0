@@ -95,8 +95,3 @@ def install_phase_overlap(scheduler_class, *, prefill, decode):
     disable._memt_phase_flags = (prefill, decode)
     scheduler_class.is_disable_overlap_for_batch = disable
     scheduler_class.run_batch = run
-
-
-def install_decode_only_overlap(scheduler_class):
-    """Compatibility entry point for the frozen Nano experiment."""
-    install_phase_overlap(scheduler_class, prefill=False, decode=True)

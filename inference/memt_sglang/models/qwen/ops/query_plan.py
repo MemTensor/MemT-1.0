@@ -40,7 +40,8 @@ def _build_plan(lengths, device):
 def _device_plan(lengths, stream):
     # Keep the real creation stream alive alongside the read-only buffers.
     # Only tile geometry is cached: no RID, slots, state, or layer parameters.
-    # Memory readers execute in eager callbacks, including breakable replay.
+    # Eager readers and captured memory nodes share this immutable geometry;
+    # captured graphs retain their own owners beyond this cache's LRU lifetime.
     with torch.cuda.stream(stream):
         return _build_plan(lengths, stream.device)
 

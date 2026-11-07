@@ -1,13 +1,15 @@
-"""Server settings: deployment capacity (memt_runtime) and fixed server limits.
+"""Deployment capacity, control policy, and server protocol limits.
 
 Wire-format values shared with the client are in memt_sglang.protocol.
 """
 
+import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 
 # Tokenizer -> worker control round trip.
-CONTROL_TIMEOUT_SECONDS = 30
+CONTROL_TIMEOUT_SECONDS = 180
 # Wait for a cancelled or finished request to leave the worker (and its KV).
 RETIRE_TIMEOUT_SECONDS = 30
 RETIRE_POLL_SECONDS = 0.01
@@ -19,6 +21,16 @@ MAX_TRANSACTION_RECEIPTS = 1024
 MAX_SNAPSHOT_NAME_LENGTH = 120
 # Largest single SSE event accepted from the native stream.
 MAX_SSE_EVENT_BYTES = 16 * 1024 * 1024
+
+
+def control_timeout_seconds():
+    """Deployment timeout; independent of model structure and memory capacity."""
+    value = float(
+        os.environ.get("MEMT_CONTROL_TIMEOUT_SECONDS", CONTROL_TIMEOUT_SECONDS)
+    )
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("MEMT_CONTROL_TIMEOUT_SECONDS must be finite and positive")
+    return value
 
 
 @dataclass(frozen=True)

@@ -327,6 +327,21 @@ _EXPERIMENT_RULES = {
 }
 _DSV4_SOURCE_SHA = "57e6a41f005e4f28a12394addb028cb4777b0f05026a8cbcefc0319527f74ea7"
 CAPTURE_TOKEN_GEARS = (512, 1024, 4096)
+# Measured on 4x B300, Flash, decode graph on in both arms, C1, one prompt
+# length per pair (graph off -> on):
+#   512   129.5 ->  87.0 ms  (-32.8%)
+#   1024  129.7 -> 121.2 ms  ( -6.6%)
+#   2048  131.6 -> 204.3 ms  (+55.2%)
+#   4096  197.7 -> 370.7 ms  (+87.5%)
+# Replay saves a fixed launch/dispatch cost but pays a higher marginal cost per
+# token, because it cannot remove the MoE compute or the collectives that
+# dominate a long prefill. The crossover sits between 1024 and 2048 tokens, so
+# no ladder makes every gear faster: giving 2048 its own gear was measured and
+# still lost (+55.2%), and padding 2048 up into the 4096 gear is worse still
+# (+168%). Capturing 512/1024 and falling back to eager above that is the best
+# available arrangement; making long prefills faster needs fewer collectives or
+# prefill/decode overlap, not more graph coverage.
+RECOMMENDED_CAPTURE_GEARS = (512, 1024)
 
 
 def explicit_capture_config(intent):

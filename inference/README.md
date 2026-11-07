@@ -34,6 +34,32 @@ uv pip install '.[client]'
 
 The `server` extra pins PyTorch 2.11.0, SGLang 0.5.16, Transformers 5.12.1, flashinfer-python[cu13] 0.6.14 and sglang-kernel 0.4.5. The `client` extra requires Transformers without installing PyTorch. The package includes a vendored subset of flash-linear-attention 0.5.2 (MIT).
 
+### Optional SGLang source patches
+
+Three capabilities need code inside SGLang. They are separate patch files,
+applied to a checkout you name — nothing is modified implicitly, and installing
+the wheel never touches an existing SGLang:
+
+| Patch | Needed by | Without it |
+| --- | --- | --- |
+| `patches/sglang-decode-owners.patch` | Flash memory decode graph | Startup refuses the graph (`capture ownership API v1` missing) rather than replaying reclaimed memory |
+| `patches/sglang-stable-topk.patch` | `C4_STABLE_TOPK` | Startup refuses the stable top-k (`API v1` missing); native top-k stays available |
+| `patches/sglang-dsv4-numerics.patch` | `MEMT_NUMERICS=strict` on Flash | The strict tier is unavailable; no code reads its switches |
+
+```bash
+python tools/apply_sglang_patch.py /path/to/sglang decode-owners --apply
+python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --apply
+```
+
+Each file is hash-checked against `patches/manifest.json` before it is applied,
+and each applies independently to the pinned base
+`fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` (0.5.16). The deterministic
+attention-backend allow-list is extended through the dependency's own
+`add_deterministic_attention_backend_choices()`, so that part needs no patch at
+all. These patches are the current delivery mechanism; tracking them as
+reviewable commits on an SGLang fork, pinned by commit or package version, is
+the intended replacement and is not done yet.
+
 Model weights and tokenizer assets are distributed through Hugging Face:
 
 - MemT-1.0-Nano: <https://huggingface.co/MemTensor/MemT-1.0-Nano>
@@ -87,7 +113,7 @@ The launcher identifies the model (Nano or Flash) from the top-level `model_type
 | `--min-kv-tokens` | Override `memt_runtime.min_kv_tokens`. |
 | `--json-model-override-args` | Accepts only `{"memt_runtime": {...}}`; model structure comes from `config.json`. |
 | `--state-directory` | Server-owned snapshot directory; required for export/import. |
-| `--deterministic-communication` | Select fixed collective settings for reproducibility experiments; this does not guarantee whole-model determinism. |
+| `--deterministic-communication` | Select fixed collective settings for reproducibility experiments; this does not guarantee whole-model determinism. Default off: whether custom all-reduce is faster depends on device count, interconnect and message size, so the startup scripts no longer disable it implicitly. A comparison that turns it off must say so, since it moves collective timings. |
 | `--dry-run` | Validate the model/runtime configuration and print the launch identity and proposed SGLang arguments without loading SGLang or model weights. |
 
 For example:
@@ -110,14 +136,21 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_PYTHON` | Python executable used by the startup scripts; default `python`. |
 | `MEMT_PORT` | Startup script port; default `30000`. |
 | `MEMT_STATE_DIRECTORY` | Startup script snapshot directory; default `./memt-state`. |
+| `MEMT_TP_SIZE` / `MEMT_EP_SIZE` / `MEMT_DP_SIZE` | Parallel layout used by the startup script; defaults are listed above. Flash needs attention TP equal to 1, so TP, EP and DP move together; a layout that does not match `CUDA_VISIBLE_DEVICES` fails during NCCL init. |
+| `MEMT_CUSTOM_ALL_REDUCE_DISABLED` | Non-empty appends `--disable-custom-all-reduce`. It is not appended by default: whether it is faster depends on device count, interconnect and message size, so it is not a universal win. |
 | `MEMT_API_KEY` | API key read by the CLI and supplied examples, sent as `Authorization: Bearer ...`. This does not configure the server's API key. |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | Must remain disabled; enabling it is rejected at startup. |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | Reuse token/slot metadata across memory layers; default `1`. |
 | `MEMT_EXPERIMENT_SLOT_READ` | Read state slots directly; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | Capture read-only memory reads in breakable decode graphs (Nano), or on Flash with `sglang-decode-owners.patch` applied; implies slot read and padded decode query. Default `0`. |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | Precision-preserving Nano output-normalization fusion and startup tensor warmup; default `0`. |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | Reuse immutable eager-writer geometry in a bounded, stream-local cache. Holds no session or state data; default `0`. |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | Read a whole decode batch with padded rows and mask inactive ones; default `0`. |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | Fail startup when native KV capacity is clipped below the requested value; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires a positive `--chunked-prefill-size` that is a whole multiple of the native page size. Both scripts leave the value at `-1`, so it must be supplied on the command line (later flags win). DP attention divides it by `dp_size` before validation, so a 2048 budget on DP4 must be passed as 8192. Default `0`. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | Release a coalesced batch at this many requests / input tokens; defaults 4 / 4096. |
 
@@ -148,6 +181,96 @@ Layout requirements:
 - Flash prefill graph and query coalescing: attention TP1 (`tp_size == dp_size == ep_size`, DP ≥ 2) with an explicit `--dp-size`, PP1, A2A `none`, overlap disabled.
 
 Overlap, query chunking and query coalescing are optional, off by default, and not part of the recommended configuration.
+
+### Memory decode graph coupling
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` is not a single switch. The launcher
+fills in four companions when they are unset, because a graph that replays a
+memory read needs all of them:
+
+| Companion | Default when the graph is on | What it selects |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | Reads memory through slots instead of the eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | Replays one padded query shape instead of a shape per batch |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | DSV4 indexer stable top-k: exact, deterministically ordered tie-breaking |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | Keeps captured tensors alive across replays |
+
+`setdefault` is used, so an explicit value wins: `MEMT_EXPERIMENT_C4_STABLE_TOPK=0`
+keeps the native top-k policy, and native selection remains usable with replay.
+Selection numerics and graph pointer ownership are independent decisions.
+
+**What the graph does and does not imply.** Enabling it fixes the four
+companions above. It does **not** fix the MHC reduction splits: those belong to
+the strict numerics tier (`MEMT_NUMERICS=strict`, i.e.
+`--enable-deterministic-inference` on Flash), which is a separate decision and is
+recorded separately. A graph-on run without the strict tier still lets native
+pick the split count from batch size.
+
+**Naming.** `C4` here is the compressed KV path (compression ratio 4) that the
+DSV4 indexer top-k selects over. It has nothing to do with expert selection, and
+the switch is better read as "DSV4 indexer stable top-k". It is a **selection
+policy**, not an implementation detail: two runs both reporting "memory decode
+graph on" can disagree on which positions the indexer keeps when scores tie, so
+the resolved values of all four companions appear in the launch identity under
+`execution.memory_decode_graph`. Report them alongside any performance or
+accuracy number produced with the graph enabled.
+
+**Hardware qualification for stable C4.** This implementation is measured only
+on B300 (compute capability 10.3, `sm_103`); other architectures are **not
+qualified**. It is not pure Python: the bundled patch supplies a fixed-width
+kernel symbol, `topk_transform_512_stable`, so `index_topk` must be 512, and a
+missing symbol or API version makes startup refuse (`runtime/stable_c4.py`).
+Confirm the symbol exists on the target device before enabling it; a result from
+an unqualified architecture cannot be compared in the same table as these arms.
+
+### Flash prefill graph: it wins small and loses large
+
+Measured on 4x B300, decode graph on in both arms, concurrency 1, one prompt
+length per pair:
+
+| Prompt | Graph off (ms) | Graph on (ms) | TTFT delta |
+| --- | --- | --- | --- |
+| 512 | 129.5 | **87.0** | **−32.8%** |
+| 1024 | 129.7 | **121.2** | **−6.6%** |
+| 2048 | 131.6 | 204.3 | +55.2% |
+| 4096 | 197.7 | 370.7 | +87.5% |
+
+The trend is monotone and both directions are stable across rounds. Replay
+removes a **fixed** cost — per-kernel launch and dispatch overhead, worth roughly
+40 ms here — while the work it cannot remove (MoE compute and NCCL collectives)
+grows with tokens. Fixed benefit over growing cost crosses over between 1024 and
+2048 tokens, so there is no ladder that makes every gear faster:
+
+- Adding a dedicated 2048 gear was tried and still lost (+55.2%).
+- The padding cost is real but secondary: 2048 padded up into the 4096 gear
+  costs +168%, versus +55% with a gear of its own.
+- The committed memory state is bitwise identical either way (20/20 layers,
+  `max|diff| = 0.000e+00`), so this is launch structure, not numerics.
+
+Capture **512/1024** and let longer prompts fall back to eager. The fallback is
+not free — its DP admission vote measured 131.6 → 138.7 ms at 2048 (+5.4%) — but
+it is far cheaper than replaying. Making long prefills faster is not a matter of
+graph coverage. Both candidate directions were measured:
+
+- **Fewer collectives.** The structure is real — the prefill MoE path takes the
+  `_use_tp_moe_gather` branch of `_run_moe_ffn_dp_sync`, so every one of the 43
+  MoE layers runs one DP gather and one combine. But the available saving is
+  small: `SGLANG_DP_USE_GATHERV=1` measured 536.3 → 532.7 ms TTFT at 4096 tokens
+  (−0.7%, C4) and 270.5 → 267.5 ms at C1 (−1.1%), both inside the spread. Under
+  SUM_LEN the gathered buffer already holds exactly the real rows, so there is no
+  zero tail to remove and only the algorithm factor remains.
+- **Prefill/decode overlap.** This one works. Enabling the native overlap
+  scheduler takes a 4096-token prompt at concurrency 8 from 2018.5 to 1792.3 ms
+  TTFT (−11.2%), 20.27 to 15.63 ms TPOT (−22.9%) and 246.1 to 308.9 output tok/s
+  (+25.5%). At concurrency 1 there is no window to fill, so it does nothing.
+
+The graph also requires a breakable decode backend. Native phase overlap is
+permitted: each rank still submits its forward to one ordered stream, and the
+graph enforces that at run time by latching the stream it replays on and refusing
+to continue if a later step runs on a different one. PDMux remains rejected,
+because it runs concurrent streams rather than one ordered stream. Overlap on/off
+is recorded in `execution.prefill_overlap` and `execution.decode_overlap`, so an
+arm cannot be described as graph-on while its overlap setting differs.
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 

@@ -40,6 +40,7 @@ def slot_query_supported(block, hidden, state_pool, slots, lengths):
 
     return True
 
+
 def slot_snapshot_read(q, snaps, plan, scale, out_dtype, *, state_slots):
     """Read runtime-validated slots using the public BF16 tile/reduction order."""
     _, length, heads, key_dim = q.shape

@@ -96,17 +96,32 @@ def _flash_prefill_config(rest, graph):
 
 
 def _unobserved_flash_actual():
-    return {"status": "not_observed", "backend": None,
-            "evidence": "worker capture events; replay_counters(runner); optional replay_observer"}
+    return {
+        "status": "not_observed",
+        "backend": None,
+        "evidence": "worker capture events; replay_counters(runner); optional replay_observer",
+    }
 
 
 def prepare(argv):
+    # A graph request selects its reader and reference geometry by default.
+    # Explicit incompatible choices are preserved so validation can explain them.
+    if enabled("MEMORY_DECODE_GRAPH"):
+        for name in ("SLOT_READ", "PADDED_DECODE_QUERY", "C4_STABLE_TOPK"):
+            os.environ.setdefault("MEMT_EXPERIMENT_" + name, "1")
+        os.environ.setdefault("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1")
     for feature in (
         "METADATA_CACHE",
         "SLOT_READ",
         "PREFILL_GRAPH",
         "DECODE_GRAPH",
         "QUERY_CHUNKS",
+        "NANO_COMPILE",
+        "COMMIT_PLAN_CACHE",
+        "MEMORY_DECODE_GRAPH",
+        "PADDED_DECODE_QUERY",
+        "REQUIRE_NATIVE_KV_CAPACITY",
+        "C4_STABLE_TOPK",
     ):
         enabled(feature)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -121,6 +136,11 @@ def prepare(argv):
     parser.add_argument("--config", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--control-timeout-seconds",
+        type=float,
+        help="Tokenizer/worker control timeout (default 180 seconds)",
+    )
+    parser.add_argument(
         "--deterministic-communication",
         action="store_true",
         help="Use NCCL Tree AllReduce, disable custom/fused collectives; not batch-invariant inference",
@@ -129,6 +149,13 @@ def prepare(argv):
         "--state-directory", help="Server-owned memory snapshot directory"
     )
     options, rest = parser.parse_known_args(argv)
+    from memt_sglang.runtime.config import control_timeout_seconds
+
+    if options.control_timeout_seconds is not None:
+        os.environ["MEMT_CONTROL_TIMEOUT_SECONDS"] = str(
+            options.control_timeout_seconds
+        )
+    timeout = control_timeout_seconds()
     path = Path(options.model_path).expanduser().resolve()
     raw = (path / "config.json").read_bytes()
     config = json.loads(raw)
@@ -145,7 +172,9 @@ def prepare(argv):
         config, json.loads(options.json_model_override_args), capacity_overrides
     )
     graph = {
-        phase: {"backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"}
+        phase: {
+            "backend": "breakable" if enabled(phase.upper() + "_GRAPH") else "disabled"
+        }
         for phase in ("prefill", "decode")
     }
     options.flash_prefill_intent = None
@@ -166,6 +195,27 @@ def prepare(argv):
         json.dumps({"memt_runtime": runtime}),
         *rest,
     ]
+    strict_requested = (
+        os.environ.get("MEMT_NUMERICS") == "strict"
+        or "--enable-deterministic-inference" in engine
+    )
+    if strict_requested:
+        if os.environ.get("MEMT_NUMERICS") == "fast":
+            raise ValueError("fast conflicts with --enable-deterministic-inference")
+        if "--enable-deterministic-inference" not in engine:
+            engine.append("--enable-deterministic-inference")
+        if model == "memt-flash":
+            # The DSV4 switches are only read by the patched dependency; stock
+            # 0.5.16 ignores them and rejects its own dsv4 attention backend
+            # under deterministic inference, so this tier ships with the patch.
+            os.environ.setdefault("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1")
+            for name, value in (
+                ("DETERMINISTIC_PROFILE", "1"),
+                ("MHC_FIXED_SPLITS", "64"),
+                ("ISOLATE_PREFILL_DECODE", "1"),
+                ("MOE_COMBINE_FP32", "1"),
+            ):
+                os.environ.setdefault("SGLANG_DSV4_" + name, value)
     if model == "memt-flash":
         engine.append("--enable-dp-attention")
     if options.deterministic_communication:
@@ -174,6 +224,7 @@ def prepare(argv):
         engine.append("--enforce-disable-flashinfer-allreduce-fusion")
     identity = {
         "schema_version": 1,
+        "control_timeout_seconds": timeout,
         "model": model,
         "chunk_tokens": memory_config.chunk_tokens,
         "sglang_version": SGLANG_VERSION,
@@ -196,8 +247,10 @@ def prepare(argv):
         identity["flash_prefill"] = {
             "requested_backend": intent.requested_backend,
             "requested_capture_tokens": list(intent.capture_tokens),
-            "resolved_backend": None, "resolved_capture_tokens": None,
-            "status": "not_resolved", "gpu_qualified": False,
+            "resolved_backend": None,
+            "resolved_capture_tokens": None,
+            "status": "not_resolved",
+            "gpu_qualified": False,
             "actual": _unobserved_flash_actual(),
         }
     if options.deterministic_communication:
@@ -258,21 +311,40 @@ def resolve_flash_prefill(options, args, identity):
     receipt = prefill_identity(intent, phase)
     if phase.backend != "disabled":
         if intent.requested_backend != "breakable":
-            raise ValueError("Flash prefill resolved enabled without an explicit request")
+            raise ValueError(
+                "Flash prefill resolved enabled without an explicit request"
+            )
         receipt = validate_capture_request(args, intent)
-        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps({
-            "requested_backend": intent.requested_backend,
-            "capture_tokens": list(intent.capture_tokens), "dp_size": intent.dp_size,
-        })
-    return {**identity, "flash_prefill": {
-        **receipt, "resolved_dp_size": args.dp_size, "actual": _unobserved_flash_actual(),
-    }}
+        os.environ["MEMT_FLASH_PREFILL_REQUEST"] = json.dumps(
+            {
+                "requested_backend": intent.requested_backend,
+                "capture_tokens": list(intent.capture_tokens),
+                "dp_size": intent.dp_size,
+            }
+        )
+    return {
+        **identity,
+        "flash_prefill": {
+            **receipt,
+            "resolved_dp_size": args.dp_size,
+            "actual": _unobserved_flash_actual(),
+        },
+    }
 
 
 def emit_flash_prefill_event(event):
     """Worker stdout evidence, separate from the parent's unresolved actual state."""
-    print(json.dumps({**event, "component": "memt_flash_prefill", "pid": os.getpid(),
-                      "gpu_qualified": False}), flush=True)
+    print(
+        json.dumps(
+            {
+                **event,
+                "component": "memt_flash_prefill",
+                "pid": os.getpid(),
+                "gpu_qualified": False,
+            }
+        ),
+        flush=True,
+    )
 
 
 def emit_graph_stats(event):
@@ -317,7 +389,9 @@ def bootstrap(*, worker=True, replay_observer=None):
         from memt_sglang.runtime import graph_stats
 
         graph_stats.install_exit_summary(
-            model=model, rank=_worker_dp_rank, emit=emit_graph_stats,
+            model=model,
+            rank=_worker_dp_rank,
+            emit=emit_graph_stats,
         )
     request = os.environ.get("MEMT_FLASH_PREFILL_REQUEST")
     if worker and model == "memt-flash" and request:
@@ -327,10 +401,14 @@ def bootstrap(*, worker=True, replay_observer=None):
         )
 
         payload = json.loads(request)
-        intent = FlashPrefillIntent(payload["requested_backend"],
-                                    tuple(payload["capture_tokens"]), payload["dp_size"])
-        install_native_worker(intent, emit=emit_flash_prefill_event,
-                              replay_observer=replay_observer)
+        intent = FlashPrefillIntent(
+            payload["requested_backend"],
+            tuple(payload["capture_tokens"]),
+            payload["dp_size"],
+        )
+        install_native_worker(
+            intent, emit=emit_flash_prefill_event, replay_observer=replay_observer
+        )
 
 
 def run_scheduler(*args, **kwargs):
@@ -361,6 +439,30 @@ def init_tokenizer(*args, **kwargs):
     return result
 
 
+MHC_PREWARM = "SGLANG_DSV4_MHC_PREWARM"
+
+
+def resolve_mhc_prewarm(model, chunked_prefill_size):
+    """Single decision point for the pinned MHC prewarm.
+
+    Pinned 0.5.16 prewarm takes chunked_prefill_size as an allocation size, so
+    it cannot run with -1 (our unchunked prefill): the unchanged native kernel
+    is left to compile on its first real forward instead.
+
+    With a positive chunk the native default applies, and an explicit user
+    value is kept. This must be the only place that writes the variable --
+    an unconditional write earlier in main() used to override both the native
+    default and an explicit setting before this decision ran.
+    """
+    if model != "memt-flash" or chunked_prefill_size != -1:
+        return
+    if os.environ.get(MHC_PREWARM, "").strip() not in ("", "1"):
+        # The user already disabled it; leaving their value alone keeps the
+        # startup identity honest about who made the decision.
+        return
+    os.environ[MHC_PREWARM] = "0"
+
+
 def main(argv=None):
     options, engine, identity = prepare(sys.argv[1:] if argv is None else argv)
     if options.dry_run:
@@ -375,11 +477,6 @@ def main(argv=None):
         os.environ["NCCL_ALGO"] = "allreduce:tree"
     # Memory injection uses the native BF16 output projection.
     os.environ["SGLANG_OPT_FP8_WO_A_GEMM"] = "0"
-    if identity["model"] == "memt-flash":
-        # Pinned 0.5.16 MHC prewarm uses chunked_prefill_size as an allocation
-        # size and cannot handle our required -1 (unchunked prefill). Let the
-        # unchanged native kernel compile on its actual first forward instead.
-        os.environ["SGLANG_DSV4_MHC_PREWARM"] = "0"
     os.environ["SGLANG_EXTERNAL_MODEL_PACKAGE"] = "memt_sglang.models"
     os.environ["MEMT_SGLANG_MODEL"] = identity["model"]
     os.environ["MEMT_MODEL_IDENTITY"] = identity["config_sha256"]
@@ -391,9 +488,26 @@ def main(argv=None):
     from sglang.srt.server_args import prepare_server_args
     from sglang.srt.utils import kill_process_tree
 
+    # The strict tier runs the dsv4 backend under deterministic inference, which
+    # stock's allow-lists exclude. Register it through the dependency's own
+    # extension point instead of editing the list in place: this runs before
+    # prepare_server_args parses, which is where the check happens.
+    if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "").lower() in (
+        "1",
+        "true",
+    ):
+        from sglang.srt.server_args import (
+            add_deterministic_attention_backend_choices,
+            add_radix_supported_deterministic_attention_backend_choices,
+        )
+
+        add_deterministic_attention_backend_choices(["dsv4"])
+        add_radix_supported_deterministic_attention_backend_choices(["dsv4"])
+
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
+    resolve_mhc_prewarm(identity["model"], args.chunked_prefill_size)
     sync_graph_config(args)
     validate_server_args(
         args,
@@ -405,6 +519,11 @@ def main(argv=None):
         deterministic_communication=options.deterministic_communication,
     )
     identity = resolve_flash_prefill(options, args, identity)
+    from memt_sglang.runtime.features import validate_numerics_tier
+
+    # Enforced before any worker starts: the tier decides whether the
+    # deterministic switches are allowed to be set at all.
+    identity["numerics_tier"] = validate_numerics_tier(args, model=identity["model"])
     identity["execution"] = execution_identity(args)
     identity["mode"] = (
         "breakable"
@@ -418,6 +537,13 @@ def main(argv=None):
         name: metadata.version(name) for name in ("sglang", "torch", "transformers")
     }
     identity["max_prefill_tokens"] = args.max_prefill_tokens
+    # A fragmented commit is one logical ingest, so it is bounded by the context
+    # the model can hold rather than by one native prefill step.
+    identity["max_commit_tokens"] = (
+        (args.context_length or args.max_prefill_tokens)
+        if identity["execution"]["commit_chunk_policy"] != "atomic"
+        else args.max_prefill_tokens
+    )
     from transformers import AutoTokenizer
 
     from memt_sglang.models.common.snapshot_identity import snapshot_identity

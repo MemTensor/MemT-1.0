@@ -9,6 +9,9 @@ from pathlib import Path
 from memt_sglang.models.common.hf_config import memt_model
 from memt_sglang.runtime.config import RuntimeConfig
 
+# Integration reasons and extension requirements are documented in
+# docs/INTEGRATION_CONSTRAINTS.md; these are implementation boundaries, not
+# benchmark qualification lists.
 REQUIRED_SERVER_VALUES = {
     "disable_radix_cache": True,
     "pp_size": 1,
@@ -130,6 +133,7 @@ def validate_server_args(
     if config_file is not None:
         raise ValueError("MemT does not support --config merging")
     from memt_sglang.runtime.features import (
+        commit_chunk_policy,
         validate_graphs,
         validate_overlap,
         validate_query_chunks,
@@ -138,7 +142,7 @@ def validate_server_args(
 
     validate_graphs(args)
     validate_overlap(args)
-    validate_query_chunks(args)
+    validate_query_chunks(args, chunk_tokens=chunk_tokens)
     if config_from_env() is not None:
         _validate_query_coalescing_layout(args, model)
         if args.enable_prefill_delayer:
@@ -161,8 +165,10 @@ def validate_server_args(
         raise ValueError(
             "MemT-1.0-Flash requires attention TP=1 (DP attention with tp_size == dp_size)"
         )
-    if args.max_prefill_tokens < chunk_tokens:
-        raise ValueError(f"max_prefill_tokens must be at least {chunk_tokens}")
+    # `global` fragments at page granularity, so one write event is not a floor.
+    minimum_prefill = 1 if commit_chunk_policy() == "global" else chunk_tokens
+    if args.max_prefill_tokens < minimum_prefill:
+        raise ValueError(f"max_prefill_tokens must be at least {minimum_prefill}")
     if Path(args.model_path).expanduser().resolve() != Path(model_path).resolve():
         raise ValueError("Engine model path differs from the validated config.json")
     if json.loads(args.json_model_override_args) != {"memt_runtime": runtime}:

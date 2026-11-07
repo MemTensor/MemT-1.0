@@ -34,6 +34,28 @@ uv pip install '.[client]'
 
 `server` 可选依赖固定使用 PyTorch 2.11.0、SGLang 0.5.16、Transformers 5.12.1、flashinfer-python[cu13] 0.6.14 和 sglang-kernel 0.4.5。`client` 可选依赖需要 Transformers，不会安装 PyTorch。包内包含 flash-linear-attention 0.5.2 的部分源码，采用 MIT 许可证。
 
+### 可选的 SGLang 源码补丁
+
+三项能力需要在 SGLang 内部改代码。它们是**三个独立补丁文件**，只应用到
+你指定的 checkout——安装 wheel 从不隐式修改已有的 SGLang：
+
+| 补丁 | 谁需要 | 不装会怎样 |
+| --- | --- | --- |
+| `patches/sglang-decode-owners.patch` | Flash memory decode graph | 启动直接拒绝该图（缺 `capture ownership API v1`），而不是去重放已回收的内存 |
+| `patches/sglang-stable-topk.patch` | `C4_STABLE_TOPK` | 启动拒绝稳定 top-k（缺 `API v1`），原生 top-k 仍可用 |
+| `patches/sglang-dsv4-numerics.patch` | Flash 上的 `MEMT_NUMERICS=strict` | strict 档不可用；没有代码读取它的开关 |
+
+```bash
+python tools/apply_sglang_patch.py /path/to/sglang decode-owners --apply
+python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --apply
+```
+
+每个文件在应用前都会与 `patches/manifest.json` 校验哈希，且各自都能独立应用到
+基线 `fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1`（0.5.16）。确定性 attention backend
+的允许列表通过依赖自带的 `add_deterministic_attention_backend_choices()` 扩展，
+这部分不需要补丁。当前交付方式仍是补丁文件；改为 SGLang fork 上可审查的提交、
+以 commit 或包版本固定，是预期的替代方案，尚未完成。
+
 模型权重和 tokenizer 文件通过 Hugging Face 分发：
 
 - MemT-1.0-Nano：<https://huggingface.co/MemTensor/MemT-1.0-Nano>
@@ -61,6 +83,7 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 | --- | --- | --- |
 | `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` |
 | TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 |
+| 拓扑覆盖变量 | `MEMT_TP_SIZE`（EP/DP 默认 1） | `MEMT_TP_SIZE`（EP/DP 跟随 TP） |
 | 每 rank 会话数 / 并发提交数 | 6 / 2 | 6 / 1 |
 | 最小 KV token 数 | 2048 | 2048 |
 | 最大 prefill token 数 | 16384 | 16384 |
@@ -87,7 +110,7 @@ Launcher 根据 `config.json` 顶层的 `model_type` 识别模型（Nano 或 Fla
 | `--min-kv-tokens` | 覆盖 `memt_runtime.min_kv_tokens`。 |
 | `--json-model-override-args` | 只接受 `{"memt_runtime": {...}}`；模型结构来自 `config.json`。 |
 | `--state-directory` | 服务端快照目录；导出／导入快照时必须配置。 |
-| `--deterministic-communication` | 为可复现实验选择固定的集合通信设置；不保证整个模型的确定性。 |
+| `--deterministic-communication` | 为可复现实验选择固定的集合通信设置；不保证整个模型的确定性。默认关闭：custom all-reduce 是否更快取决于卡数、互联与消息大小，因此启动脚本不再隐式禁用它。关闭它的对照必须在结果里说明，因为它改变集合通信耗时。 |
 | `--dry-run` | 校验模型和运行时配置，打印启动身份信息及拟传入 SGLang 的参数，不加载 SGLang 或模型权重。 |
 
 例如：
@@ -110,14 +133,21 @@ Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size 
 | `MEMT_PYTHON` | 启动脚本使用的 Python 可执行文件，默认 `python`。 |
 | `MEMT_PORT` | 启动脚本的服务端口，默认 `30000`。 |
 | `MEMT_STATE_DIRECTORY` | 启动脚本的快照目录，默认 `./memt-state`。 |
+| `MEMT_TP_SIZE` / `MEMT_EP_SIZE` / `MEMT_DP_SIZE` | 启动脚本的并行拓扑，默认值见上表。Flash 的 attention TP 必须为 1，所以 TP/EP/DP 三者要一起改；拓扑与 `CUDA_VISIBLE_DEVICES` 的卡数不符时会卡在 NCCL 初始化。 |
+| `MEMT_CUSTOM_ALL_REDUCE_DISABLED` | 设为非空时启动脚本追加 `--disable-custom-all-reduce`。默认不追加，因为该选项是否更快取决于卡数、互联与消息大小，不属于通用最优。 |
 | `MEMT_API_KEY` | CLI 和示例读取的 API key，以 `Authorization: Bearer ...` 发送；该变量不配置服务端的 API key。 |
 | `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES` | 必须保持关闭，开启时会拒绝启动。 |
 | `MEMT_EXPERIMENT_METADATA_CACHE` | 跨记忆层复用 token/slot 元数据，默认 `1`。 |
 | `MEMT_EXPERIMENT_SLOT_READ` | 按 slot 直接读取状态，默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graph，默认 `0`。 |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graph，默认 `0`。 |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | 把只读记忆读取纳入 breakable decode graph；Nano 直接可用，Flash 需要先应用 `sglang-decode-owners.patch`。隐含 slot read 与 padded decode query。默认 `0`。 |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | 保留精度的 Nano 输出归一化融合与启动预热，默认 `0`。 |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | 复用不可变的 eager writer 几何，缓存有界且按 stream 隔离，不含会话或状态内容；默认 `0`。 |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | 整个 decode batch 按填充后的行读取并屏蔽非活跃行；默认 `0`。 |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | 原生 KV 容量被缩减时拒绝启动；默认 `0`。 |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | 原生阶段 overlap（实验功能），默认 `0`。 |
-| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合 `--chunked-prefill-size`，每 rank 至少 2048 token。默认 `0`。 |
+| `MEMT_EXPERIMENT_QUERY_CHUNKS` | query 分块（实验功能），须配合正的 `--chunked-prefill-size`，且为原生 page size 的整数倍。两个启动脚本都把它留在 `-1`，因此必须在命令行给出（后出现的同名参数生效）。DP attention 会先把它除以 `dp_size` 再校验：DP4 上要 2048 的预算得传 8192。默认 `0`。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | 空闲时最多等待该毫秒数（不超过 10）合并 query（实验功能）；默认 `0`（关闭）。 |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_REQUESTS` / `MEMT_EXPERIMENT_QUERY_COALESCE_TOKENS` | 合并达到该请求数 / 输入 token 数即放行；默认 4 / 4096。 |
 
@@ -148,6 +178,78 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 - Flash prefill graph 与 query 合并：attention TP1（`tp_size == dp_size == ep_size`，DP ≥ 2），显式传入 `--dp-size`，PP1，A2A `none`，关闭 overlap。
 
 Overlap、query 分块和 query 合并为可选功能，默认关闭，不属于推荐配置。
+
+### Memory decode graph 的开关联动
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` 不是一个独立开关。未显式设置时，启动器会自动补齐
+四项配套，因为重放记忆读取的图需要它们同时成立：
+
+| 配套开关 | 图开启时的默认 | 作用 |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | 通过 slot 读取记忆，替代 eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | 重放单一 padding 查询形状，而非按 batch 各一档 |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | DSV4 indexer 稳定 top-k：精确且定序确定的 tie 处理 |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | 让捕获的张量在重放间保持存活 |
+
+用的是 `setdefault`，因此**显式值优先**：`MEMT_EXPERIMENT_C4_STABLE_TOPK=0` 保留原生 top-k
+策略，而原生选择同样可以配合重放使用。选择策略的数值与图指针所有权是两件独立的事。
+
+**命名**：这里的 `C4` 指压缩倍率为 4 的 KV 路径，是 DSV4 indexer 做 top-k 选择的对象，
+**与专家选择无关**；这个开关更准确的读法是"DSV4 indexer 稳定 top-k"。
+
+**开启该图会做什么、不会做什么**：它会固定上面四项配套，但**不会**固定 MHC 归约的切分数——
+那属于 strict 数值档（`MEMT_NUMERICS=strict`，Flash 上即
+`--enable-deterministic-inference`），是另一个独立决定，也单独记录。未开 strict 档的
+graph-on 运行，切分数仍由原生按 batch 大小决定。
+
+它是**选择策略**，不是实现细节。两次都标称开启了 memory decode graph 的运行，
+可能在 indexer 于分数并列时保留哪些位置上并不一致，所以四项配套的最终取值都写进启动身份
+`execution.memory_decode_graph`。使用该图产生的任何性能或精度结论，都应同时报告这四项。
+
+**stable C4 的硬件资质**：这套实现只在 B300（compute capability 10.3，`sm_103`）上
+实测通过，其他架构**未经资质认定**。它并非纯 Python 逻辑：附带补丁提供
+`topk_transform_512_stable` 这一宽度固定的内核符号，`index_topk` 必须是 512，
+符号或 API 版本缺失时启动会直接拒绝（`runtime/stable_c4.py`）。换机器前先在目标卡上
+确认该符号存在，再判断能否开启；在未认定的架构上开启，得到的结果不能与其他臂并列比较。
+
+### Flash prefill graph：小 prompt 赚，大 prompt 亏
+
+4×B300 实测，两臂都开 decode graph，并发 1，每对一组提示长度：
+
+| Prompt | 关（ms） | 开（ms） | TTFT 变化 |
+| --- | --- | --- | --- |
+| 512 | 129.5 | **87.0** | **−32.8%** |
+| 1024 | 129.7 | **121.2** | **−6.6%** |
+| 2048 | 131.6 | 204.3 | +55.2% |
+| 4096 | 197.7 | 370.7 | +87.5% |
+
+趋势单调，两个方向逐轮都稳定。重放省下的是**固定**成本——每个 kernel 的 launch/派发开销，
+在这里约 40 ms——而它拿不掉的工作（MoE 计算与 NCCL 集合通信）随 token 数增长。
+固定收益除以增长成本，交叉点落在 1024 与 2048 之间，所以**不存在让每一档都更快的档位表**：
+
+- 试过给 2048 单独加一档，仍然慢（+55.2%）。
+- padding 成本真实但次要：2048 被抬到 4096 档是 +168%，而单独一档是 +55%。
+- 两种模式下提交的记忆状态逐位相同（20/20 层，`max|diff| = 0.000e+00`），
+  所以这是启动结构差异，不是数值差异。
+
+做法：只捕获 **512/1024**，更长的 prompt 回退到 eager。回退不是免费的——它的 DP 准入投票
+在 2048 上实测 131.6 → 138.7 ms（+5.4%）——但远比重放便宜。要让长 prefill 变快，
+不是扩大图的覆盖。两个候选方向都实测过：
+
+- **减少集合通信。** 结构是真实的——prefill MoE 走 `_run_moe_ffn_dp_sync` 的
+  `_use_tp_moe_gather` 分支，43 个 MoE 层每层一次 DP gather 加一次 combine——但可回收量小：
+  `SGLANG_DP_USE_GATHERV=1` 在 4096 token 上 536.3 → 532.7 ms TTFT（−0.7%，C4）、
+  C1 上 270.5 → 267.5 ms（−1.1%），都在散布内。SUM_LEN 下 gathered buffer 本来就只含真实行，
+  没有零尾可去，剩下的只是算法差。
+- **prefill/decode 重叠。** 这条有效。打开原生 overlap 调度器，4096 token、并发 8：
+  TTFT 2018.5 → 1792.3 ms（−11.2%）、TPOT 20.27 → 15.63 ms（−22.9%）、
+  输出吞吐 246.1 → 308.9 tok/s（+25.5%）。并发 1 时没有可填的窗口，因此无效。
+
+该图还要求 decode 后端为 breakable。**原生 phase overlap 允许共存**：每个 rank 的前向仍然
+提交到同一条有序 stream，图在运行时固定它重放所用的 stream，一旦后续步骤换到别的 stream
+就拒绝继续。PDMux 仍然被拒绝，因为它跑的是并发 stream，而不是一条有序 stream。
+overlap 的开关状态记录在 `execution.prefill_overlap` 与 `execution.decode_overlap` 里，
+因此不能把一个 overlap 设置不同的臂描述成「graph on」。
 
 Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 

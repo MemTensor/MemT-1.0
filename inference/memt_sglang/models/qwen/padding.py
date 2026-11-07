@@ -20,7 +20,9 @@ def wrap_input_projection(layer, native, context, eager):
         # Resolve at replay time. Capturing the original ForwardBatch here
         # would retain the capture gear's token count for every later request.
         batch = context().forward_batch
-        return live_gate_projection(layer.in_proj_ba, hidden, batch.num_token_non_padded_cpu)
+        return live_gate_projection(
+            layer.in_proj_ba, hidden, batch.num_token_non_padded_cpu
+        )
 
     @wraps(native)
     def project(hidden):
@@ -50,7 +52,9 @@ def install_live_gate_projection(model):
         if layer is None or getattr(layer, "_memt_live_gate_projection", False):
             continue
         layer._forward_input_proj = wrap_input_projection(
-            layer, layer._forward_input_proj, get_tc_piecewise_forward_context,
+            layer,
+            layer._forward_input_proj,
+            get_tc_piecewise_forward_context,
             eager_on_graph(True),
         )
         layer._memt_live_gate_projection = True

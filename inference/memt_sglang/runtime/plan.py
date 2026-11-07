@@ -3,6 +3,55 @@
 from dataclasses import dataclass
 
 from memt_sglang.protocol import MemoryRequest, is_memt_rid
+from memt_sglang.runtime.features import commit_chunk_policy
+
+# A tail policy keeps whole ordinary blocks and may fragment only the tail.
+# The block is the model's memory write-event size, not a scheduler constant:
+# install_partial_prefill() publishes the resolved geometry here so a checkpoint
+# with a different chunk_tokens cannot be validated against the wrong block.
+_COMMIT_BLOCK_TOKENS = None
+
+
+def set_commit_block_tokens(tokens):
+    """Publish the resolved write-event geometry; later calls must agree."""
+    global _COMMIT_BLOCK_TOKENS
+    if type(tokens) is not int or tokens < 1:
+        raise ValueError("Commit block must be a positive integer")
+    if _COMMIT_BLOCK_TOKENS is not None and _COMMIT_BLOCK_TOKENS != tokens:
+        raise ValueError("Commit block geometry is immutable once resolved")
+    _COMMIT_BLOCK_TOKENS = tokens
+
+
+def commit_block_tokens():
+    if _COMMIT_BLOCK_TOKENS is None:
+        raise ValueError("Commit block geometry has not been resolved")
+    return _COMMIT_BLOCK_TOKENS
+
+
+def validate_commit_span(request, prefix, count, policy):
+    """Validate logical offsets before any layer mutates private state."""
+    if (
+        type(prefix) is not int
+        or type(count) is not int
+        or prefix < 0
+        or count <= 0
+        or prefix + count > request.length
+    ):
+        raise ValueError("Commit fragment is outside its logical input")
+    if policy == "atomic":
+        if prefix != 0 or count != request.length:
+            raise ValueError("Commit was split or has a cached prefix")
+        return
+    if policy == "tail":
+        block = commit_block_tokens()
+        tail_start = request.length // block * block
+        if prefix < tail_start and (prefix % block != 0 or count != block):
+            raise ValueError(
+                f"Tail policy requires complete {block}-token blocks before the tail"
+            )
+        return
+    if policy != "global":
+        raise ValueError(f"Unknown commit chunk policy {policy!r}")
 
 
 @dataclass(frozen=True)
@@ -59,11 +108,11 @@ class StepPlan:
                 touched.add(request.session)
                 if request.operation == "commit" and decode:
                     raise ValueError("commit cannot decode")
-                if request.operation == "commit" and (
-                    prefix != 0 or length != request.length
-                ):
-                    raise ValueError(
-                        "Commit was split or has a cached prefix; no state published"
+                if request.operation == "commit":
+                    # The policy decides whether a split is legal; `atomic` keeps
+                    # exactly the old guarantee, so its behaviour cannot change.
+                    validate_commit_span(
+                        request, prefix, length, commit_chunk_policy()
                     )
                 samples.append(Sample(request, offset, offset + length, prefix, decode))
             offset += length

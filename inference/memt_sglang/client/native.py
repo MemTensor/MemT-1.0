@@ -109,7 +109,15 @@ class NativeClient:
         for field in ("chunk_tokens", "max_prefill_tokens"):
             if type(result.get(field)) is not int or result[field] < 1:
                 raise MemTClientError(f"Invalid {field}", stage="capabilities")
-        if result["chunk_tokens"] > result["max_prefill_tokens"]:
+        policy = result.get("commit_chunk_policy", "atomic")
+        if policy not in ("atomic", "global", "tail"):
+            raise MemTClientError("Invalid commit chunk policy", stage="capabilities")
+        if policy != "atomic" and (
+            type(result.get("max_commit_tokens")) is not int
+            or result["max_commit_tokens"] < 1
+        ):
+            raise MemTClientError("Invalid max_commit_tokens", stage="capabilities")
+        if policy == "atomic" and result["chunk_tokens"] > result["max_prefill_tokens"]:
             raise MemTClientError(
                 "Memory chunk exceeds prefill capacity", stage="capabilities"
             )
@@ -295,7 +303,15 @@ class NativeClient:
 
     def commit(self, session, ids, *, lease=None, transaction=None):
         """Explicit document/token ingestion; chunking is not used for QA turns."""
-        chunk_tokens = self.capabilities()["chunk_tokens"]
+        capabilities = self.capabilities()
+        if capabilities.get("commit_chunk_policy", "atomic") != "atomic":
+            tokens = token_ids(ids)
+            if len(tokens) > capabilities["max_commit_tokens"]:
+                raise ValueError("Logical commit exceeds the server context limit")
+            return self._commit_encoded(
+                session, [tokens], lease=lease, transaction=transaction
+            )
+        chunk_tokens = capabilities["chunk_tokens"]
         return self._commit_encoded(
             session,
             chunks(ids, chunk_tokens=chunk_tokens),
@@ -307,7 +323,10 @@ class NativeClient:
         encoded = [token_ids(turn) for turn in turns]
         if not encoded:
             raise ValueError("Expected at least one encoded turn")
-        prefill_limit = self.capabilities()["max_prefill_tokens"]
+        capabilities = self.capabilities()
+        prefill_limit = capabilities.get(
+            "max_commit_tokens", capabilities["max_prefill_tokens"]
+        )
         if any(len(turn) > prefill_limit for turn in encoded):
             raise ValueError(
                 f"A complete QA turn exceeds the {prefill_limit}-token prefill capacity"
