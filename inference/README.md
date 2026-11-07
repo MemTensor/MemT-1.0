@@ -223,26 +223,35 @@ missing symbol or API version makes startup refuse (`runtime/stable_c4.py`).
 Confirm the symbol exists on the target device before enabling it; a result from
 an unqualified architecture cannot be compared in the same table as these arms.
 
-### Flash prefill graph: which gears pay off
+### Flash prefill graph: it wins small and loses large
 
-Measured on 4x B300 with the decode graph on in both arms, concurrency 1:
+Measured on 4x B300, decode graph on in both arms, concurrency 1, one prompt
+length per pair:
 
-| Prompt | Prefill graph off | Prefill graph on | TTFT | TPOT |
-| --- | --- | --- | --- | --- |
-| 512 tokens | 129.5 ms | **87.0 ms** | **−32.8%** | unchanged (15.44 → 15.48) |
-| 4096 tokens | 197.7 ms | 370.7 ms | +87.5% | unchanged (16.37 → 16.04) |
+| Prompt | Graph off (ms) | Graph on (ms) | TTFT delta |
+| --- | --- | --- | --- |
+| 512 | 129.5 | **87.0** | **−32.8%** |
+| 1024 | 129.7 | **121.2** | **−6.6%** |
+| 2048 | 131.6 | 204.3 | +55.2% |
+| 4096 | 197.7 | 370.7 | +87.5% |
 
-Both directions are stable across rounds (per-round spread under 2%), and the
-committed memory state is bitwise identical either way (20 layers,
-`max|diff| = 0.000e+00`), so this is a launch-structure change, not a numeric one.
+The trend is monotone and both directions are stable across rounds. Replay
+removes a **fixed** cost — per-kernel launch and dispatch overhead, worth roughly
+40 ms here — while the work it cannot remove (MoE compute and NCCL collectives)
+grows with tokens. Fixed benefit over growing cost crosses over between 1024 and
+2048 tokens, so there is no ladder that makes every gear faster:
 
-Replay helps where it removes launch overhead and hurts where prefill is
-collective-bound: a 4096-token prefill spends its time inside NCCL, and replay
-serializes what eager could overlap. The recommended ladder is therefore
-**512/1024**. Capturing only those gears costs nothing at 4096: the long prompt
-falls back to eager by native's own rule and lands at 200.4 ms, i.e. the same as
-running with the graph off. 4096 remains a selectable gear — it is a supported
-native shape — but it is not a gear to capture for speed on this hardware.
+- Adding a dedicated 2048 gear was tried and still lost (+55.2%).
+- The padding cost is real but secondary: 2048 padded up into the 4096 gear
+  costs +168%, versus +55% with a gear of its own.
+- The committed memory state is bitwise identical either way (20/20 layers,
+  `max|diff| = 0.000e+00`), so this is launch structure, not numerics.
+
+Capture **512/1024** and let longer prompts fall back to eager. The fallback is
+not free — its DP admission vote measured 131.6 → 138.7 ms at 2048 (+5.4%) — but
+it is far cheaper than replaying. Making long prefills faster needs fewer
+collectives or prefill/decode overlap, not more graph coverage; a trace of the
+Flash prefill puts 15.6 s of kernel time in AllGather alone.
 
 The graph also requires a breakable decode backend. Native phase overlap is
 permitted: each rank still submits its forward to one ordered stream, and the
