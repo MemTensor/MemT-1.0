@@ -327,6 +327,17 @@ _EXPERIMENT_RULES = {
 }
 _DSV4_SOURCE_SHA = "57e6a41f005e4f28a12394addb028cb4777b0f05026a8cbcefc0319527f74ea7"
 CAPTURE_TOKEN_GEARS = (512, 1024, 4096)
+# Measured on 4x B300, Flash, decode graph on in both arms, C1:
+#   512 tokens   TTFT 129.5 -> 87.0 ms  (-32.8%), TPOT unchanged
+#   4096 tokens  TTFT 197.7 -> 370.7 ms (+87.5%), TPOT unchanged
+# Replay wins where it removes launch overhead and loses where prefill is
+# collective-bound: a 4096-token prefill spends its time inside NCCL, and
+# replaying it serializes what eager could overlap. Capturing a gear larger
+# than the prompt also replays padded rows. The default ladder is therefore
+# 512/1024 only; 4096 stays selectable because it is a supported native shape
+# and an operator may want its capture for reasons this measurement does not
+# cover, but it is not a recommended gear on this hardware.
+RECOMMENDED_CAPTURE_GEARS = (512, 1024)
 
 
 def explicit_capture_config(intent):
