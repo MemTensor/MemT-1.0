@@ -234,8 +234,16 @@ graph-on 运行，切分数仍由原生按 batch 大小决定。
 
 做法：只捕获 **512/1024**，更长的 prompt 回退到 eager。回退不是免费的——它的 DP 准入投票
 在 2048 上实测 131.6 → 138.7 ms（+5.4%）——但远比重放便宜。要让长 prefill 变快，
-需要减少集合通信或做 prefill/decode 重叠，而不是扩大图的覆盖；Flash prefill 的 trace 里
-仅 AllGather 一项就占 15.6 s 的 kernel 时间。
+不是扩大图的覆盖。两个候选方向都实测过：
+
+- **减少集合通信。** 结构是真实的——prefill MoE 走 `_run_moe_ffn_dp_sync` 的
+  `_use_tp_moe_gather` 分支，43 个 MoE 层每层一次 DP gather 加一次 combine——但可回收量小：
+  `SGLANG_DP_USE_GATHERV=1` 在 4096 token 上 536.3 → 532.7 ms TTFT（−0.7%，C4）、
+  C1 上 270.5 → 267.5 ms（−1.1%），都在散布内。SUM_LEN 下 gathered buffer 本来就只含真实行，
+  没有零尾可去，剩下的只是算法差。
+- **prefill/decode 重叠。** 这条有效。打开原生 overlap 调度器，4096 token、并发 8：
+  TTFT 2018.5 → 1792.3 ms（−11.2%）、TPOT 20.27 → 15.63 ms（−22.9%）、
+  输出吞吐 246.1 → 308.9 tok/s（+25.5%）。并发 1 时没有可填的窗口，因此无效。
 
 该图还要求 decode 后端为 breakable。**原生 phase overlap 允许共存**：每个 rank 的前向仍然
 提交到同一条有序 stream，图在运行时固定它重放所用的 stream，一旦后续步骤换到别的 stream
