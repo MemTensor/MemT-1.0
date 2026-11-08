@@ -1,8 +1,22 @@
 """Opt-in graph and slot readers; metadata caching is enabled by default."""
 
+import logging
 import os
 from dataclasses import replace
 from importlib import import_module
+
+logger = logging.getLogger(__name__)
+
+# Smallest per-rank query chunk budget this configuration has been validated at.
+# It is a tested range, not a correctness requirement, and is unrelated to the
+# checkpoint's `memt.chunk_tokens` (which sizes memory write events on the
+# commit path and is never read while serving a query). Chunking a query always
+# changes the prefill shapes, so a split query is not bitwise equal to an
+# unsplit one at any budget, including this one; queries shorter than the
+# budget are never split and stay bitwise equal. Lowering this bound needs the
+# same evidence per model: unsplit-versus-split logits across page, compression
+# and state-chunk boundaries.
+VALIDATED_MIN_QUERY_CHUNK_TOKENS = 2048
 
 
 def enabled(name, *, environment=None):
@@ -286,6 +300,20 @@ def validate_query_chunks(args):
             f"Query chunk budget {chunk} must be a multiple of native page size "
             f"{page}; note that DP attention divides the configured budget by "
             "dp_size before this check"
+        )
+    # Below the validated minimum this is a performance note, not a refusal:
+    # chunking already makes a split query non-bitwise-equal at ANY budget (the
+    # prefill shapes change), so 2048 cannot be a correctness boundary. It is
+    # also not derived from the checkpoint's memt.chunk_tokens -- that sizes
+    # memory write events on the commit path and is never read serving a query.
+    # Refusing here rejected usable DP-attention layouts outright: a 4096
+    # launch budget arrives as 1024 per rank on DP4.
+    if chunk < VALIDATED_MIN_QUERY_CHUNK_TOKENS:
+        logger.warning(
+            "Query chunk budget %d per rank is below the validated minimum %d; "
+            "it is accepted, but results above this range are unmeasured",
+            chunk,
+            VALIDATED_MIN_QUERY_CHUNK_TOKENS,
         )
 
 
