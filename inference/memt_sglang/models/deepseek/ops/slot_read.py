@@ -4,8 +4,12 @@ import torch
 
 
 def gather_bf16(pool, slots):
-    if not (pool.is_cuda and pool.dtype == torch.float32
-            and pool.is_contiguous() and slots.is_contiguous()):
+    if not (
+        pool.is_cuda
+        and pool.dtype == torch.float32
+        and pool.is_contiguous()
+        and slots.is_contiguous()
+    ):
         return pool.index_select(0, slots).to(torch.bfloat16)
     from ._triton.slot_read import gather_cuda
 

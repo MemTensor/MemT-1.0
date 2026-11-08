@@ -14,6 +14,39 @@ def enabled(name, *, environment=None):
     return value == "1"
 
 
+def commit_chunk_policy(*, environment=None):
+    """Reject requests for an extension that this core package does not install."""
+    environment = os.environ if environment is None else environment
+    policy = environment.get("MEMT_EXPERIMENT_COMMIT_CHUNK_POLICY", "atomic")
+    if policy != "atomic":
+        raise ValueError(
+            "Continuous commit scheduling is provided by the separate global/tail extension"
+        )
+    return policy
+
+
+def candidate_slots_per_transaction():
+    """The atomic writer uses one private transaction candidate."""
+    return 1
+
+
+# Numerics tiers, the Flash capture-ownership gate and the stable-C4
+# selector require the bundled SGLang patch, so they ship with it.
+
+
+def validate_native_kv_capacity(actual, requested):
+    if (
+        enabled("REQUIRE_NATIVE_KV_CAPACITY")
+        and requested is not None
+        and actual < requested
+    ):
+        raise MemoryError(
+            f"Native KV capacity was clipped from requested={requested} to actual={actual}; "
+            "increase --mem-fraction-static or reduce MemT state reservations. "
+            "This strict experiment requires the requested capacity before readiness."
+        )
+
+
 def sync_graph_config(args):
     """Use resolved native backends for worker hooks; reject unsupported ones."""
     graph = args.cuda_graph_config
@@ -32,6 +65,17 @@ def sync_graph_config(args):
             for phase, config in phases.items()
         }
     )
+    if enabled("MEMORY_DECODE_GRAPH"):
+        if phases["decode"].backend != "breakable" or not enabled("SLOT_READ"):
+            raise ValueError(
+                "Memory decode graph requires breakable decode and SLOT_READ=1"
+            )
+        if any(overlap_phases()):
+            raise ValueError("Memory decode graph requires overlap scheduling disabled")
+        if getattr(args, "enable_pdmux", False):
+            raise ValueError(
+                "Memory decode graph does not support concurrent PDMux streams"
+            )
 
 
 def overlap_phases():
@@ -71,13 +115,32 @@ def validate_graphs(args):
 
 
 def validate_query_chunks(args):
+    """Query budgets follow native page geometry, not memory write-event size."""
     chunk = getattr(args, "chunked_prefill_size", None)
-    if type(chunk) is not int or (
-        chunk != -1 and not (enabled("QUERY_CHUNKS") and chunk >= 2048)
-    ):
+    if type(chunk) is int and chunk == -1:
+        return
+    if type(chunk) is not int or chunk <= 0 or not enabled("QUERY_CHUNKS"):
+        raise ValueError("Query chunking requires QUERY_CHUNKS=1 and a positive budget")
+    page = getattr(args, "page_size", None)
+    # server_args.py:7639-7645 asserts chunked_prefill_size % page_size == 0, and
+    # DP attention divides the operator's value by dp_size first
+    # (server_args.py:5616-5620), so an 8192 budget on dp 3 arrives as 2730.
+    # Checking only `chunk >= page` let that through to a bare native assert.
+    if page is not None and chunk % page:
         raise ValueError(
-            "Query chunking requires its experiment flag and budget >=2048; otherwise use -1"
+            f"Query chunk budget {chunk} must be a multiple of native page size "
+            f"{page}; note that DP attention divides the configured budget by "
+            "dp_size before this check"
         )
+
+
+def _pin_intermediates_enabled(*, environment=None):
+    """Pinned SGLang reads this one with its own case-insensitive boolean."""
+    environment = os.environ if environment is None else environment
+    return str(environment.get("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "0")).lower() in (
+        "1",
+        "true",
+    )
 
 
 def execution_identity(args):
@@ -95,8 +158,26 @@ def execution_identity(args):
     coalescing = config_from_env()
     result = dict(
         graph_backends=backends,
+        # A memory decode graph is not a single switch: it implies a reader, a
+        # query geometry, a selection policy and captured-tensor ownership.
+        # Recording them here keeps the run identity self-describing, so an arm
+        # cannot be described as "graph on" while its selection policy differs
+        # from the model the numbers were attributed to.
+        memory_decode_graph=dict(
+            enabled=enabled("MEMORY_DECODE_GRAPH"),
+            slot_read=enabled("SLOT_READ"),
+            padded_decode_query=enabled("PADDED_DECODE_QUERY"),
+            c4_stable_topk=enabled("C4_STABLE_TOPK"),
+            pin_decode_intermediates=_pin_intermediates_enabled(),
+        ),
         metadata_cache=enabled("METADATA_CACHE"),
         slot_read=enabled("SLOT_READ"),
+        nano_compile=enabled("NANO_COMPILE"),
+        commit_plan_cache=enabled("COMMIT_PLAN_CACHE"),
+        padded_decode_query=enabled("PADDED_DECODE_QUERY"),
+        require_native_kv_capacity=enabled("REQUIRE_NATIVE_KV_CAPACITY"),
+        commit_chunk_policy=commit_chunk_policy(),
+        commit_semantics_version="atomic-fresh-kv-v1",
         prefill_overlap=prefill,
         decode_overlap=decode,
         query_coalescing=asdict(coalescing) if coalescing else None,

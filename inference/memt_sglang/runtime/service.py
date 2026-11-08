@@ -15,6 +15,7 @@ from memt_sglang.protocol import (
     ReceiptStatus,
     SessionError,
     TransactionStatus,
+    UnknownSessionError,
     validate_boolean,
     validate_payload,
     validate_session_id,
@@ -96,7 +97,9 @@ class SessionService:
 
     def _state(self, session):
         if session not in self.sessions:
-            raise SessionError("Unknown session; create_session first")
+            # Same class the worker uses, so a recovery path can tell "the
+            # entry is gone" from "the entry is busy" without inspecting text.
+            raise UnknownSessionError("Unknown session; create_session first")
         return self.sessions[session]
 
     def _owned(self, session, token, *, recovery=False):
@@ -112,7 +115,24 @@ class SessionService:
         return state
 
     async def _recover(self, state, session):
-        result = await self._call(state, "fence", session)
+        try:
+            result = await self._call(state, "fence", session)
+        except UnknownSessionError:
+            # Only this error proves the worker holds no such session, so the
+            # lost reply belonged to a create that never took effect or to a
+            # close that did. Either way there is nothing left to fence, and
+            # keeping the tokenizer entry would reserve a session slot that no
+            # worker holds.
+            del self.sessions[session]
+            raise
+        except SessionError:
+            # Any other session error describes a session that still exists
+            # (an active operation, a lease conflict, a worker that rejected
+            # the fence for its own reason). The control channel maps unknown
+            # worker errors onto SessionError too, so dropping the entry here
+            # would destroy a live session -- and its memory slot -- on a
+            # transient condition. Keep it and let the caller retry.
+            raise
         if result["status"] == TransactionStatus.OPEN:
             result = await self._call(
                 state, "abort", session, transaction=result["transaction"]
@@ -165,7 +185,7 @@ class SessionService:
         state = self._owned(
             session,
             payload.get("lease"),
-            recovery=action in {"recover", "status", "release"},
+            recovery=action in {"recover", "status", "release", "close"},
         )
         state.busy = True
         try:

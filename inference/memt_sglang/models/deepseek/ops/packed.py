@@ -11,6 +11,7 @@ import torch
 from memt_sglang._vendor.fla.ops.utils.constant import RCP_LN2
 from memt_sglang._vendor.fla.ops.utils.cumsum import chunk_local_cumsum
 from memt_sglang.models.common.constants import WY_TILE_TOKENS
+from memt_sglang.models.common.plan_cache import writer_plan
 from memt_sglang.models.deepseek.ops._triton.intra import write_only_intra
 from memt_sglang.models.deepseek.ops._triton.state import memt_gdn2_fwd_h
 from memt_sglang.models.deepseek.ops.layout import single_commit_plan
@@ -80,7 +81,7 @@ def token_memory_packed(
     scale,
     chunk_tokens,
 ):
-    plan = packed_plan(lengths, q.device, chunk_tokens=chunk_tokens)
+    plan = writer_plan(packed_plan, lengths, q.device, chunk_tokens=chunk_tokens)
     k, v, log_decay, write = [
         tensor.contiguous() for tensor in (k, v, log_decay, write)
     ]
