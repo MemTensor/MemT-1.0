@@ -104,6 +104,12 @@ def _unobserved_flash_actual():
 
 
 def prepare(argv):
+    # A graph request selects its reader and reference geometry by default.
+    # Explicit incompatible choices are preserved so validation can explain them.
+    if enabled("MEMORY_DECODE_GRAPH"):
+        for name in ("SLOT_READ", "PADDED_DECODE_QUERY", "C4_STABLE_TOPK"):
+            os.environ.setdefault("MEMT_EXPERIMENT_" + name, "1")
+        os.environ.setdefault("SGLANG_DSV4_PIN_DECODE_INTERMEDIATES", "1")
     for feature in (
         "METADATA_CACHE",
         "SLOT_READ",
@@ -115,6 +121,7 @@ def prepare(argv):
         "MEMORY_DECODE_GRAPH",
         "PADDED_DECODE_QUERY",
         "REQUIRE_NATIVE_KV_CAPACITY",
+        "C4_STABLE_TOPK",
     ):
         enabled(feature)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
@@ -188,6 +195,27 @@ def prepare(argv):
         json.dumps({"memt_runtime": runtime}),
         *rest,
     ]
+    strict_requested = (
+        os.environ.get("MEMT_NUMERICS") == "strict"
+        or "--enable-deterministic-inference" in engine
+    )
+    if strict_requested:
+        if os.environ.get("MEMT_NUMERICS") == "fast":
+            raise ValueError("fast conflicts with --enable-deterministic-inference")
+        if "--enable-deterministic-inference" not in engine:
+            engine.append("--enable-deterministic-inference")
+        if model == "memt-flash":
+            # The DSV4 switches are only read by the patched dependency; stock
+            # 0.5.16 ignores them and rejects its own dsv4 attention backend
+            # under deterministic inference, so this tier ships with the patch.
+            os.environ.setdefault("MEMT_EXPERIMENT_C4_STABLE_TOPK", "1")
+            for name, value in (
+                ("DETERMINISTIC_PROFILE", "1"),
+                ("MHC_FIXED_SPLITS", "64"),
+                ("ISOLATE_PREFILL_DECODE", "1"),
+                ("MOE_COMBINE_FP32", "1"),
+            ):
+                os.environ.setdefault("SGLANG_DSV4_" + name, value)
     if model == "memt-flash":
         engine.append("--enable-dp-attention")
     if options.deterministic_communication:
@@ -460,6 +488,22 @@ def main(argv=None):
     from sglang.srt.server_args import prepare_server_args
     from sglang.srt.utils import kill_process_tree
 
+    # The strict tier runs the dsv4 backend under deterministic inference, which
+    # stock's allow-lists exclude. Register it through the dependency's own
+    # extension point instead of editing the list in place: this runs before
+    # prepare_server_args parses, which is where the check happens.
+    if os.environ.get("SGLANG_DSV4_DETERMINISTIC_PROFILE", "").lower() in (
+        "1",
+        "true",
+    ):
+        from sglang.srt.server_args import (
+            add_deterministic_attention_backend_choices,
+            add_radix_supported_deterministic_attention_backend_choices,
+        )
+
+        add_deterministic_attention_backend_choices(["dsv4"])
+        add_radix_supported_deterministic_attention_backend_choices(["dsv4"])
+
     from memt_sglang.runtime.http import install_http
 
     args = prepare_server_args(engine)
@@ -475,6 +519,11 @@ def main(argv=None):
         deterministic_communication=options.deterministic_communication,
     )
     identity = resolve_flash_prefill(options, args, identity)
+    from memt_sglang.runtime.features import validate_numerics_tier
+
+    # Enforced before any worker starts: the tier decides whether the
+    # deterministic switches are allowed to be set at all.
+    identity["numerics_tier"] = validate_numerics_tier(args, model=identity["model"])
     identity["execution"] = execution_identity(args)
     identity["mode"] = (
         "breakable"

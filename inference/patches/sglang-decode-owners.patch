@@ -1,0 +1,41 @@
+diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
+index 2648061..8085cee 100644
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -191,6 +191,8 @@ def _get_mhc_ops() -> MhcOps:
+     return MhcOps(hc_split_sinkhorn, mhc_fused_post_pre, npu_hc_pre)
+ 
+ 
++DSV4_DECODE_OWNERS_API_VERSION = 1
++
+ logger = logging.getLogger(__name__)
+ 
+ _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
+@@ -2046,6 +2048,12 @@ class DeepseekV4Model(nn.Module):
+         prefix: str = "",
+     ) -> None:
+         super().__init__()
++        self._pin_decode_graph_owners = get_bool_env_var(
++            "SGLANG_DSV4_PIN_DECODE_INTERMEDIATES"
++        )
++        # Retain every capture version until model teardown; never replace
++        # these owners with tensors from an eager fallback or a later bucket.
++        self._decode_graph_tensor_owners = []
+         self.pp_group = get_pp_group()
+         self.hidden_size = config.hidden_size
+         if self.pp_group.is_first_rank:
+@@ -2334,6 +2342,14 @@ class DeepseekV4Model(nn.Module):
+                         prev_post=prev_post,
+                         prev_comb=prev_comb,
+                     )
++                if (
++                    self._pin_decode_graph_owners
++                    and forward_batch.forward_mode.is_decode()
++                    and torch.cuda.is_current_stream_capturing()
++                ):
++                    self._decode_graph_tensor_owners.append(
++                        (hidden_states, prev_residual, prev_post, prev_comb)
++                    )
+                 if capture_dspark and i in self.dspark_layers_to_capture:
+                     if use_fused:
+                         completed = layer.hc_post(

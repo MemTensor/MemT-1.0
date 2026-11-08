@@ -34,6 +34,32 @@ uv pip install '.[client]'
 
 The `server` extra pins PyTorch 2.11.0, SGLang 0.5.16, Transformers 5.12.1, flashinfer-python[cu13] 0.6.14 and sglang-kernel 0.4.5. The `client` extra requires Transformers without installing PyTorch. The package includes a vendored subset of flash-linear-attention 0.5.2 (MIT).
 
+### Optional SGLang source patches
+
+Three capabilities need code inside SGLang. They are separate patch files,
+applied to a checkout you name — nothing is modified implicitly, and installing
+the wheel never touches an existing SGLang:
+
+| Patch | Needed by | Without it |
+| --- | --- | --- |
+| `patches/sglang-decode-owners.patch` | Flash memory decode graph | Startup refuses the graph (`capture ownership API v1` missing) rather than replaying reclaimed memory |
+| `patches/sglang-stable-topk.patch` | `C4_STABLE_TOPK` | Startup refuses the stable top-k (`API v1` missing); native top-k stays available |
+| `patches/sglang-dsv4-numerics.patch` | `MEMT_NUMERICS=strict` on Flash | The strict tier is unavailable; no code reads its switches |
+
+```bash
+python tools/apply_sglang_patch.py /path/to/sglang decode-owners --apply
+python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --apply
+```
+
+Each file is hash-checked against `patches/manifest.json` before it is applied,
+and each applies independently to the pinned base
+`fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` (0.5.16). The deterministic
+attention-backend allow-list is extended through the dependency's own
+`add_deterministic_attention_backend_choices()`, so that part needs no patch at
+all. These patches are the current delivery mechanism; tracking them as
+reviewable commits on an SGLang fork, pinned by commit or package version, is
+the intended replacement and is not done yet.
+
 Model weights and tokenizer assets are distributed through Hugging Face:
 
 - MemT-1.0-Nano: <https://huggingface.co/MemTensor/MemT-1.0-Nano>
@@ -116,6 +142,11 @@ Nano requires DP attention to be disabled. Flash enables DP attention and requir
 | `MEMT_EXPERIMENT_SLOT_READ` | Read state slots directly; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_GRAPH` | Prefill CUDA Graphs; default `0`. |
 | `MEMT_EXPERIMENT_DECODE_GRAPH` | Decode CUDA Graphs; default `0`. |
+| `MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH` | Capture read-only memory reads in breakable decode graphs (Nano), or on Flash with `sglang-decode-owners.patch` applied; implies slot read and padded decode query. Default `0`. |
+| `MEMT_EXPERIMENT_NANO_COMPILE` | Precision-preserving Nano output-normalization fusion and startup tensor warmup; default `0`. |
+| `MEMT_EXPERIMENT_COMMIT_PLAN_CACHE` | Reuse immutable eager-writer geometry in a bounded, stream-local cache. Holds no session or state data; default `0`. |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | Read a whole decode batch with padded rows and mask inactive ones; default `0`. |
+| `MEMT_EXPERIMENT_REQUIRE_NATIVE_KV_CAPACITY` | Fail startup when native KV capacity is clipped below the requested value; default `0`. |
 | `MEMT_EXPERIMENT_PREFILL_OVERLAP` / `MEMT_EXPERIMENT_DECODE_OVERLAP` | Native phase overlap (experimental); default `0`. |
 | `MEMT_EXPERIMENT_QUERY_CHUNKS` | Chunk queries (experimental); requires `--chunked-prefill-size` with at least 2048 tokens per rank. Default `0`. |
 | `MEMT_EXPERIMENT_QUERY_COALESCE_MS` | Wait up to this many ms (at most 10) to batch queries at idle boundaries (experimental); default `0` (off). |
@@ -148,6 +179,32 @@ Layout requirements:
 - Flash prefill graph and query coalescing: attention TP1 (`tp_size == dp_size == ep_size`, DP ≥ 2) with an explicit `--dp-size`, PP1, A2A `none`, overlap disabled.
 
 Overlap, query chunking and query coalescing are optional, off by default, and not part of the recommended configuration.
+
+### Memory decode graph coupling
+
+`MEMT_EXPERIMENT_MEMORY_DECODE_GRAPH=1` is not a single switch. The launcher
+fills in four companions when they are unset, because a graph that replays a
+memory read needs all of them:
+
+| Companion | Default when the graph is on | What it selects |
+| --- | --- | --- |
+| `MEMT_EXPERIMENT_SLOT_READ` | `1` | Reads memory through slots instead of the eager gather |
+| `MEMT_EXPERIMENT_PADDED_DECODE_QUERY` | `1` | Replays one padded query shape instead of a shape per batch |
+| `MEMT_EXPERIMENT_C4_STABLE_TOPK` | `1` | Stable exact C4 top-k tie ordering |
+| `SGLANG_DSV4_PIN_DECODE_INTERMEDIATES` | `1` | Keeps captured tensors alive across replays |
+
+`setdefault` is used, so an explicit value wins: `MEMT_EXPERIMENT_C4_STABLE_TOPK=0`
+keeps the native top-k policy, and native selection remains usable with replay.
+Selection numerics and graph pointer ownership are independent decisions.
+
+Stable C4 is a **selection policy**, not an implementation detail. Two runs both
+reporting "memory decode graph on" can disagree on which experts C4 selects, so
+the resolved values of all four companions appear in the launch identity under
+`execution.memory_decode_graph`. Report them alongside any performance or
+accuracy number produced with the graph enabled.
+
+The graph also requires a breakable decode backend with overlap scheduling off;
+the launcher rejects incompatible combinations before any worker starts.
 
 The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 
