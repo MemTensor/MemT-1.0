@@ -89,6 +89,16 @@ class MemoryHooks:
 
         self.memory_decode_graph = None
         self.dp_attention = dp_attention
+        if enabled("RECURRENT_SHORT_PREFILL"):
+            from memt_sglang.runtime.short_prefill import (
+                install_recurrent_short_prefill,
+            )
+
+            install_recurrent_short_prefill()
+        if enabled("SPLIT_KV_VERIFY"):
+            from memt_sglang.runtime.verify_splitkv import install_split_kv_verify
+
+            install_split_kv_verify()
         if enabled("MEMORY_DECODE_GRAPH"):
             from memt_sglang.runtime.memory_graph import (
                 MemoryDecodeGraph,

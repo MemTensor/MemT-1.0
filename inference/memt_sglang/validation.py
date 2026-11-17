@@ -20,7 +20,6 @@ REQUIRED_SERVER_VALUES = {
     "tokenizer_worker_num": 1,
     "nnodes": 1,
     "quantization": None,
-    "speculative_algorithm": None,
     "disaggregation_mode": "null",
     "grpc_port": None,
 }
@@ -29,6 +28,9 @@ SUPPORTED_SERVER_VALUES = {
     "load_format": ("auto", "safetensors"),
     "model_config_parser": ("auto", "hf"),
     "model_impl": ("auto", "sglang"),
+    # NEXTN is the native MTP path. Validation runs after SGLang's arg hook,
+    # which rewrites NEXTN -> EAGLE, so both spellings must be accepted.
+    "speculative_algorithm": (None, "NEXTN", "EAGLE"),
 }
 DISALLOWED_SERVER_FLAGS = (
     "trust_remote_code",

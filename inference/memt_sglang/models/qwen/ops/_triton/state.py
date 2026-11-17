@@ -17,7 +17,11 @@ def _configs():
 
     if os.environ.get("MEMT_NO_AUTOTUNE") == "1":
         return [triton.Config({"BV": 32}, num_warps=2, num_stages=2)]
-    warps = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
+    # Blackwell shipped with a single num_warps choice, which left the widest
+    # tile unswept. Measured on B300 (sm103): this scan takes 1.41 s with 2 warps
+    # and 1.31-1.32 s with 8-16 warps for a 32k-token write, so the original
+    # [2] ceiling was leaving ~7% of the long-document commit on the table.
+    warps = [2, 4, 8, 16] if IS_NVIDIA_BLACKWELL else [2, 4]
     return [
         triton.Config(
             {"BV": value_block_size}, num_warps=num_warps, num_stages=num_stages

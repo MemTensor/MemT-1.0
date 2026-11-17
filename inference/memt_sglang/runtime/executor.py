@@ -21,6 +21,8 @@ class MemoryRuntime:
     def __init__(self, pool: StatePool):
         self.pool = pool
         self.plan: StepPlan | None = None
+        self._plan_key = None
+        self._preopened = False
         self._layers: set[int] = set()
         self.worker_sessions = WorkerSessions(pool)
         self.kv_sessions = set()
@@ -29,9 +31,26 @@ class MemoryRuntime:
         self.padded_decode_query = enabled("PADDED_DECODE_QUERY")
         self._prepared_groups = {}
 
-    def begin(self, forward_batch) -> StepPlan:
+    @staticmethod
+    def _batch_key(forward_batch):
+        return (forward_batch.forward_mode, tuple(forward_batch.rids or ()))
+
+    def owns(self, forward_batch) -> bool:
+        """True when the open step was begun for exactly this batch."""
+        return self.plan is not None and self._plan_key == self._batch_key(
+            forward_batch
+        )
+
+    def begin(self, forward_batch, *, preopened=False) -> StepPlan:
+        if self.plan is not None and self._preopened:
+            # A step opened ahead of execute() by a graph load_batch that then
+            # never replayed (the forward fell back to eager). It ran no layer
+            # and holds only queries, so discard it instead of wedging the rank.
+            self.finish(success=False)
         if self.plan is not None:
             raise SessionError("Previous step has not finished")
+        self._plan_key = self._batch_key(forward_batch)
+        self._preopened = preopened
         batch = copy(forward_batch)
         batch.rids = [
             rid
@@ -208,5 +227,7 @@ class MemoryRuntime:
                     )
         finally:
             self.plan = None
+            self._plan_key = None
+            self._preopened = False
             self._layers.clear()
             self._prepared_groups = {}
