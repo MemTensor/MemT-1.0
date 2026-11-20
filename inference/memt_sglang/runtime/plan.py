@@ -29,10 +29,19 @@ class StepPlan:
         if mode.is_idle() or original_mode.is_idle() or not any(map(is_memt_rid, rids)):
             return cls((), 0)
         decode = mode.is_decode()
-        if not decode and not mode.is_extend():
+        # TARGET_VERIFY reports is_extend() but carries no extend_seq_lens_cpu.
+        # Each request owns draft_token_num contiguous rows: the bonus token plus
+        # the drafts being verified.
+        verify = mode.is_target_verify()
+        if not decode and not verify and not mode.is_extend():
             raise ValueError("MemT requires eager extend or decode batches")
         if decode:
             lengths, prefixes = [1] * len(rids), [0] * len(rids)
+        elif verify:
+            rows = int(getattr(batch.spec_info, "draft_token_num", 0) or 0)
+            if rows < 1:
+                raise ValueError("TARGET_VERIFY batch carries no draft_token_num")
+            lengths, prefixes = [rows] * len(rids), [0] * len(rids)
         else:
             lengths = batch.extend_seq_lens_cpu
             prefixes = batch.extend_prefix_lens_cpu

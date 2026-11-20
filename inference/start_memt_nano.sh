@@ -10,7 +10,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 exec "${MEMT_PYTHON:-python}" -m memt_sglang.launch \
     --model-path "$model_path" \
     --port "${MEMT_PORT:-30000}" \
-    --tp-size 2 --ep 1 --dp-size 1 --max-prefill-tokens 16384 \
+    --tp-size "${MEMT_TP_SIZE:-2}" --ep 1 --dp-size 1 --max-prefill-tokens 16384 \
     --state-directory "${MEMT_STATE_DIRECTORY:-./memt-state}" \
     --max-sessions-per-rank 6 --max-inflight-commits-per-rank 2 \
     --min-kv-tokens 2048 --max-total-tokens 65536 \

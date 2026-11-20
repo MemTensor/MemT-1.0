@@ -112,3 +112,9 @@ class MemTQwen3_5MoeForCausalLM(nn.Module):
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
+
+    def get_embed_and_head(self):
+        # Read by eagle_worker_v2.init_lm_head() when the NEXTN/MTP draft shares
+        # the target's embedding and head. The text backbone is nested under
+        # .model here, so forward the same two tensors the native wrapper does.
+        return self.model.embed_tokens.weight, self.lm_head.weight
