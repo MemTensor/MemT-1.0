@@ -2,17 +2,16 @@
 
 from collections.abc import Mapping
 
-# Published config.json model_type of each released model. The value is the
-# name used everywhere outside the backbone-specific packages (models/qwen,
-# models/deepseek): "memt-nano" is MemT-1.0-Nano, "memt-flash" is MemT-1.0-Flash.
+# Published HF model_type to serving/client family identifier.
 MODEL_TYPES = {
     "memt_qwen3_5_moe": "memt-nano",
     "memt_deepseek_v4": "memt-flash",
+    "memt_nemotron_h": "memt-pro",
 }
 
 
 def memt_model(config):
-    """Return "memt-nano" or "memt-flash" for a published MemT-1.0 config, else None."""
+    """Return the MemT family identifier for a published config, else None."""
     fields = config if isinstance(config, Mapping) else config.to_dict()
     return MODEL_TYPES.get(fields.get("model_type"))
 

@@ -7,6 +7,7 @@
 
   <p align="center">
     <a href="https://huggingface.co/collections/MemTensor/memt-1"><img src="https://img.shields.io/static/v1?label=HuggingFace&message=Models&color=yellow" alt="HuggingFace"></a>
+    <a href="https://modelscope.cn/models/MemTensor/MemT-1.0-Pro"><img src="https://img.shields.io/static/v1?label=ModelScope&message=Models&color=blue" alt="ModelScope"></a>
     <a href="https://arxiv.org/abs/2610.26825">
       <img src="assets/badges/tech-report.svg" alt="Tech Report: PDF" width="140" height="20">
     </a>
@@ -16,6 +17,8 @@
     <a href="README.md">English</a> | <strong>中文</strong>
   </p>
 </div>
+
+> 🚀🚀 **我们很高兴宣布 MemT-1.0-Pro [MemT × NVIDIA] 正式发布！**
 
 <a id="overview"></a>
 ## 💡 概述
@@ -36,6 +39,7 @@ MemT-1.0 将动态 Local Memory 与可训练的 Hyper Memory 相结合，使模�
 |---|---|---:|---:|---:|---:|
 | [MemT-1.0-Nano](https://huggingface.co/MemTensor/MemT-1.0-Nano) | Qwen3.6-35B-A3B | 36B | 3B | 451M | 10M |
 | [MemT-1.0-Flash](https://huggingface.co/MemTensor/MemT-1.0-Flash) | DeepSeek-V4-Flash | 288B | 17B | 3.61B | 336M |
+| [MemT-1.0-Pro](https://huggingface.co/MemTensor/MemT-1.0-Pro) | NVIDIA-Nemotron-3-Ultra-550B-A55B | 554B | 59B | 4.23B | 13M |
 
 ### 架构
 
@@ -50,7 +54,7 @@ MemT-1.0 将动态 Local Memory 与可训练的 Hyper Memory 相结合，使模�
 
 ### 评测结果
 
-在 11 个记忆基准上，MemT-1.0-Flash 和 MemT-1.0-Nano 在**已评测的参数化记忆方法**中分别排名第一和第二。总体而言，表现较强的文本记忆系统仍然领先，尤其是在需要从长历史中检索细粒度证据的任务上。
+在 11 个记忆基准上，MemT-1.0-Pro、MemT-1.0-Flash 和 MemT-1.0-Nano 在**已评测的参数化记忆方法**中分别排名第一、第二和第三。总体而言，表现较强的文本记忆系统仍然领先，尤其是在需要从长历史中检索细粒度证据的任务上。
 
 ![MemT-1.0 在代表性记忆基准上的表现](assets/figure_performance.png)
 
@@ -63,7 +67,7 @@ MemT-1.0 提出了一种智能体框架，用于在长程编程任务中复用�
 <a id="quick-start"></a>
 ## 🚀 快速开始
 
-以下示例通过 SGLang 部署 MemT-1.0-Nano，并使用 `memt_sglang` Python 客户端进行带原生记忆的对话。部署细节和 MemT-1.0-Flash 配置见[中文推理指南](inference/README_zh.md)或[英文推理指南](inference/README.md)。
+以下示例通过 SGLang 部署 MemT-1.0-Nano，并使用 `memt_sglang` Python 客户端进行带原生记忆的对话。部署细节和 MemT-1.0-Flash / Pro 配置见[中文推理指南](inference/README_zh.md)或[英文推理指南](inference/README.md)。
 
 ### 安装
 

@@ -1,5 +1,6 @@
 """Experimental breakable decode with a fresh eager memory lifecycle per step."""
 
+from contextlib import nullcontext
 from dataclasses import fields, replace
 from functools import wraps
 
@@ -119,7 +120,25 @@ def install_decode_query_guard():
     if getattr(original_can_run, "_memt_query_guard", False):
         return
     original_execute = DecodeCudaGraphRunner.execute
+    original_capture = DecodeCudaGraphRunner.capture_one_shape
     install_logits_output_bridge()
+
+    # Pro needs the native Mamba split-op context around graph capture and
+    # replay. SGLang 0.5.16 sets it for prefill but not for breakable decode;
+    # Nano/Flash expose no decode_context, so this is a no-op there.
+    def model_context(self, batch):
+        hooks = getattr(self.model_runner.model, "_memory_hooks", None)
+        context = getattr(hooks, "decode_context", None)
+        return nullcontext() if context is None else context(batch)
+
+    @wraps(original_capture)
+    def capture(self, size, forward, *args, **kwargs):
+        @wraps(forward)
+        def scoped_forward(input_ids, positions, batch, *fargs, **fkwargs):
+            with model_context(self, batch):
+                return forward(input_ids, positions, batch, *fargs, **fkwargs)
+
+        return original_capture(self, size, scoped_forward, *args, **kwargs)
 
     @wraps(original_can_run)
     def can_run(self, batch):
@@ -141,7 +160,8 @@ def install_decode_query_guard():
         runtime.begin(batch)
         success = False
         try:
-            result = original_execute(self, batch, *args, **kwargs)
+            with model_context(self, batch):
+                result = original_execute(self, batch, *args, **kwargs)
             manager = getattr(
                 self.model_runner.model._memory_hooks, "memory_decode_graph", None
             )
@@ -160,6 +180,7 @@ def install_decode_query_guard():
 
     can_run._memt_query_guard = True
     DecodeCudaGraphRunner.can_run_graph = can_run
+    DecodeCudaGraphRunner.capture_one_shape = capture
     DecodeCudaGraphRunner.execute = execute
 
 

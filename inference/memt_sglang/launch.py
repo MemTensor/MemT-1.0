@@ -218,6 +218,11 @@ def prepare(argv):
                 os.environ.setdefault("SGLANG_DSV4_" + name, value)
     if model == "memt-flash":
         engine.append("--enable-dp-attention")
+    if model == "memt-pro" and not any(
+        value == "--mamba-ssm-dtype" or value.startswith("--mamba-ssm-dtype=")
+        for value in rest
+    ):
+        engine.extend(["--mamba-ssm-dtype", "float32"])
     if options.deterministic_communication:
         if "--disable-custom-all-reduce" not in engine:
             engine.append("--disable-custom-all-reduce")
@@ -380,6 +385,10 @@ def bootstrap(*, worker=True, replay_observer=None):
         from memt_sglang.models.deepseek.hf_config import register_deepseek_config
 
         register_deepseek_config()
+    elif model == "memt-pro":
+        from memt_sglang.models.nemotron.hf_config import register_nemotron_config
+
+        register_nemotron_config()
     else:
         raise ValueError("Invalid MemT worker model")
     from memt_sglang.models.common.loader import install_model_loader
@@ -551,11 +560,11 @@ def main(argv=None):
     identity["snapshot_identity"] = snapshot_identity(
         json.loads((model_path / "config.json").read_text()), tokenizer
     )
-    identity["memory_encoding"] = (
-        "qwen-text-raw-v1"
-        if identity["model"] == "memt-nano"
-        else "deepseek-v4-native-raw-v1"
-    )
+    identity["memory_encoding"] = {
+        "memt-nano": "qwen-text-raw-v1",
+        "memt-flash": "deepseek-v4-native-raw-v1",
+        "memt-pro": "nemotron-text-raw-v1",
+    }[identity["model"]]
     os.environ["MEMT_HF_SNAPSHOT_IDENTITY"] = identity["snapshot_identity"]
     os.environ["MEMT_MEMORY_ENCODING"] = identity["memory_encoding"]
     install_http(http_server, identity, dp_size=args.dp_size)

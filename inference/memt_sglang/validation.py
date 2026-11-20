@@ -50,6 +50,14 @@ DISALLOWED_SERVER_FLAGS = (
     "enable_hierarchical_cache",
 )
 MODEL_SERVER_VALUES = {
+    # Pro requires DP1 and FP32 Mamba SSM state; its memory integration has no
+    # DP-attention path. Enforced before model load, like the Nano/Flash entries.
+    "memt-pro": {
+        "enable_dp_attention": (False,),
+        "dp_size": (1,),
+        "kv_cache_dtype": ("auto", "bfloat16"),
+        "mamba_ssm_dtype": ("float32",),
+    },
     "memt-nano": {
         "enable_dp_attention": (False,),
         "kv_cache_dtype": ("auto", "bfloat16"),
@@ -68,15 +76,17 @@ DETERMINISTIC_SERVER_VALUES = {
 
 
 def validate_model_config(config):
-    """Return "memt-nano" or "memt-flash" and the validated memory configuration."""
+    """Return the MemT family and validated memory configuration."""
     model = memt_model(config)
     if model == "memt-nano":
         from memt_sglang.models.qwen.config import parse_memory_config
     elif model == "memt-flash":
         from memt_sglang.models.deepseek.config import parse_memory_config
+    elif model == "memt-pro":
+        from memt_sglang.models.nemotron.config import parse_memory_config
     else:
         raise ValueError(
-            "Only published MemT-1.0-Nano and MemT-1.0-Flash configs are supported"
+            "Only MemT-1.0-Nano, MemT-1.0-Flash and MemT-1.0-Pro configs are supported"
         )
     return model, parse_memory_config(config)
 
@@ -112,7 +122,7 @@ def _validate_query_coalescing_layout(args, model):
         return
     if not (args.enable_dp_attention and dp >= 2 and tp == dp and ep == tp):
         raise ValueError(
-            "Query coalescing on Flash requires DP attention with attention TP1 "
+            "Query coalescing requires DP attention with attention TP1 "
             f"(tp == dp == ep, dp >= 2); got tp={tp}, dp={dp}, ep={ep}"
         )
 
@@ -172,6 +182,13 @@ def validate_server_args(
     if json.loads(args.json_model_override_args) != {"memt_runtime": runtime}:
         raise ValueError("Engine overrides differ from the validated runtime config")
     environment = os.environ if environment is None else environment
+    if model == "memt-pro":
+        for key, expected in (
+            ("SGLANG_MAMBA_SSM_DTYPE", "float32"),
+            ("SGLANG_MAMBA_CONV_DTYPE", "bfloat16"),
+        ):
+            if environment.get(key, expected) != expected:
+                raise ValueError(f"Pro requires {key}={expected}")
     if environment.get("SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES", "0").lower() not in (
         "0",
         "false",

@@ -32,7 +32,7 @@ def load_chat_format(
     chat_encoding_spec="auto",
     deepseek_encoder=None,
 ):
-    """Return (chat_format, parser) for a local Nano or Flash checkpoint.
+    """Return (chat_format, parser) for a local Nano, Flash or Pro checkpoint.
 
     The tokenizer is supplied separately. Following SGLang's separation,
     chat_format applies the HF chat template or native chat_encoding; parser
@@ -50,14 +50,15 @@ def load_chat_format(
     path = Path(path).resolve(strict=True)
     config = json.loads((path / "config.json").read_text())
     model = memt_model(config)
-    if model not in {"memt-nano", "memt-flash"}:
-        raise ValueError("Expected a MemT-1.0-Nano or MemT-1.0-Flash model directory")
+    if model not in {"memt-nano", "memt-flash", "memt-pro"}:
+        raise ValueError("Expected a MemT-1.0-Nano, Flash or Pro model directory")
     if chat_encoding_spec not in {"auto", None, "dsv4"}:
         raise ValueError(f"Unsupported chat_encoding_spec: {chat_encoding_spec!r}")
-    if model == "memt-nano":
+    if model in {"memt-nano", "memt-pro"}:
         if deepseek_encoder is not None or chat_encoding_spec == "dsv4":
             raise ValueError("DeepSeek encoding requires MemT-1.0-Flash")
-        chat_format = QwenChatFormat(
+        format_type = NemotronChatFormat if model == "memt-pro" else QwenChatFormat
+        chat_format = format_type(
             tokenizer, model_config=config, chat_template_kwargs=chat_template_kwargs
         )
         return chat_format, QwenResponseParser(
@@ -221,6 +222,73 @@ class QwenChatFormat(ChatFormat):
             tokenizer,
             chat_template_kwargs=chat_template_kwargs or {},
             model_config=model_config,
+        )
+
+
+class NemotronChatFormat(ChatFormat):
+    """Native Nemotron Jinja, with HF Pro's context/replay boundaries."""
+
+    encoding = "nemotron-text-raw-v1"
+
+    def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+        options = dict(chat_template_kwargs or {})
+        if options.get("truncate_history_thinking", False) is not False:
+            raise ValueError("Pro sessions require truncate_history_thinking=False")
+        options["truncate_history_thinking"] = False
+        super().__init__(
+            tokenizer, chat_template_kwargs=options, model_config=model_config
+        )
+
+    def render(
+        self,
+        messages,
+        *,
+        generation=False,
+        thinking=None,
+        system=None,
+        tools=None,
+        context=False,
+    ):
+        messages = deepcopy(list(messages))
+        if system is not None:
+            messages.insert(0, {"role": "system", "content": system})
+        options = dict(self.chat_template_kwargs, truncate_history_thinking=False)
+        if thinking is not None:
+            options["enable_thinking"] = thinking
+        rendered = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=generation,
+            tools=tools,
+            **options,
+        )
+        if not context:
+            empty_system = "<|im_start|>system\n<|im_end|>\n"
+            if not rendered.startswith(empty_system):
+                raise ValueError(
+                    "Nemotron replay expects the native empty system prefix"
+                )
+            rendered = rendered[len(empty_system) :]
+        return rendered
+
+    def prompt(self, messages, *, tools=None, thinking=None):
+        return self.encode(
+            self.render(
+                messages, generation=True, thinking=thinking, tools=tools, context=True
+            )
+        )
+
+    def query(self, turns, *, system=None, tools=None, has_memory=False):
+        messages = [message for turn in turns for message in turn.messages]
+        return self.encode(
+            self.render(
+                messages,
+                generation=True,
+                thinking=turns[-1].thinking,
+                system=system,
+                tools=tools,
+                context=True,
+            )
         )
 
 

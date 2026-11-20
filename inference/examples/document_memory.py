@@ -16,7 +16,9 @@ from memt_sglang.client import (
 
 def main():
     arg_parser = argparse.ArgumentParser(description=__doc__)
-    arg_parser.add_argument("model_path", help="Local Nano or Flash HF model directory")
+    arg_parser.add_argument(
+        "model_path", help="Local Nano, Flash or Pro HF model directory"
+    )
     arg_parser.add_argument("--url", default="http://127.0.0.1:30000")
     args = arg_parser.parse_args()
     model_type = json.loads((Path(args.model_path) / "config.json").read_text())[

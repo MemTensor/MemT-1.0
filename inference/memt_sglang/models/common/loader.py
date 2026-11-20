@@ -6,6 +6,7 @@ from functools import wraps
 MEMT_ARCHITECTURES = {
     "memt_qwen3_5_moe": "MemTQwen3_5MoeForCausalLM",
     "memt_deepseek_v4": "MemTDeepseekV4ForCausalLM",
+    "memt_nemotron_h": "MemTNemotronHForCausalLM",
 }
 
 

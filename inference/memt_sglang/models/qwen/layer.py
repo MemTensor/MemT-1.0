@@ -58,11 +58,12 @@ class QwenMemoryBlock(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.gate_rank = getattr(memory_config, "gate_rank", head_dim)
         self.value_dim = num_heads * head_dim
         self.read_scale = head_dim**-0.5
         self.qkv_rows = (num_heads * head_dim,) * 3
         erase_write_rows = (num_heads * head_dim,) * 2
-        self.gate_rows = (*erase_write_rows, head_dim, head_dim)
+        self.gate_rows = (*erase_write_rows, self.gate_rank, self.gate_rank)
         self.in_proj_rows = self.qkv_rows + self.gate_rows
         self.qkv_width = sum(self.qkv_rows)
         self.write_gate_rows = self.gate_rows[:-1]
@@ -70,8 +71,8 @@ class QwenMemoryBlock(nn.Module):
             self.qkv_width, self.qkv_width + sum(self.write_gate_rows)
         )
         self.in_proj = nn.Linear(hidden_size, sum(self.in_proj_rows), bias=False)
-        self.f_down = nn.Linear(head_dim, num_heads * head_dim, bias=False)
-        self.g_down = nn.Linear(head_dim, num_heads * head_dim, bias=False)
+        self.f_down = nn.Linear(self.gate_rank, num_heads * head_dim, bias=False)
+        self.g_down = nn.Linear(self.gate_rank, num_heads * head_dim, bias=False)
         self.decay_scale_log = nn.Parameter(torch.zeros(num_heads))
         self.decay_bias = nn.Parameter(torch.zeros(num_heads * head_dim))
         self.o_norm = MemTRMSNormGated(
@@ -131,7 +132,7 @@ class QwenMemoryBlock(nn.Module):
             projection.view(1, len(hidden_states), self.num_heads, dim)
             for projection in (q, k, v)
         ]
-        output_gate = self.g_down(F.linear(hidden_batch, weight[-dim:]))
+        output_gate = self.g_down(F.linear(hidden_batch, weight[-self.gate_rank :]))
         if not commit:
             # Read fixed snapshots with the released tiled reduction order.
             # Preserve QKV GEMM layout; a q-only GEMM can change rounding.
@@ -199,7 +200,7 @@ class QwenMemoryBlock(nn.Module):
             projection.view(1, len(hidden_states), self.num_heads, dim)
             for projection in (q, k, v)
         ]
-        output_gate = self.g_down(F.linear(hidden_batch, weight[-dim:]))
+        output_gate = self.g_down(F.linear(hidden_batch, weight[-self.gate_rank :]))
         q = l2norm(q.contiguous())
         plan = query_plan(lengths, hidden_states.device)
         read = slot_snapshot_read(
