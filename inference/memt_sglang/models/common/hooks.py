@@ -84,6 +84,19 @@ def _warmup_prefill_lengths(server_args):
 
 
 class MemoryHooks:
+    def captured_memory(self, layer, hidden, block):
+        """Read a residual during dedicated memory-graph capture, if active."""
+        graph = self.memory_decode_graph
+        if graph is None or not graph.capture_active:
+            return None
+        return graph.read(layer, hidden, block)
+
+    def note_captured_injection(self, layer, residual):
+        """Record that a captured residual reached its native projection."""
+        graph = self.memory_decode_graph
+        if graph is not None and graph.capture_active and residual is not None:
+            graph.injected.add((layer, len(residual)))
+
     def setup_execution(self, *, dp_attention=False):
         from memt_sglang.runtime.features import enabled
 

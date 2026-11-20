@@ -1,6 +1,6 @@
 """Bounded query coalescing at idle prefill boundaries.
 
-Nano (no DP attention): the attention-TP leader decides and broadcasts.
+Nano and Pro (no DP attention): the attention-TP leader decides and broadcasts.
 Flash (DP attention, attention TP1): ranks exchange observations on the world group.
 
 The request/token targets release a batch; they do not cap the native batch.

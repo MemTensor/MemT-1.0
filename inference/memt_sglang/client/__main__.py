@@ -39,7 +39,7 @@ def main():
         "--model",
         required=True,
         choices=tuple(MODEL_TYPES.values()),
-        help="MemT-1.0-Nano or MemT-1.0-Flash",
+        help="MemT-1.0-Nano, MemT-1.0-Flash or MemT-1.0-Pro",
     )
     deepseek = arg_parser.add_mutually_exclusive_group()
     deepseek.add_argument(
@@ -65,7 +65,7 @@ def main():
         arg_parser.error(
             "--model memt-flash requires --deepseek-encoder or --chat-template-kwargs"
         )
-    if args.model == "memt-nano" and (
+    if args.model in {"memt-nano", "memt-pro"} and (
         args.deepseek_encoder or args.chat_template_kwargs is not None
     ):
         arg_parser.error("DeepSeek encoder options require --model memt-flash")

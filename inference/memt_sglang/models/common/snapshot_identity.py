@@ -14,6 +14,9 @@ def snapshot_identity(config, tokenizer):
     if model == "memt-nano":
         backbone = fields["backbone_configs"]
         codec = "qwen-text-raw-v1"
+    elif model == "memt-pro":
+        backbone = fields["backbone_configs"]
+        codec = "nemotron-text-raw-v1"
     elif model == "memt-flash":
         from transformers import DeepseekV4Config
 

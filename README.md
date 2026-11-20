@@ -7,6 +7,7 @@
 
   <p align="center">
     <a href="https://huggingface.co/collections/MemTensor/memt-1"><img src="https://img.shields.io/static/v1?label=HuggingFace&message=Models&color=yellow" alt="HuggingFace"></a>
+    <a href="https://modelscope.cn/models/MemTensor/MemT-1.0-Pro"><img src="https://img.shields.io/static/v1?label=ModelScope&message=Models&color=blue" alt="ModelScope"></a>
     <a href="https://arxiv.org/abs/2610.26825">
       <img src="assets/badges/tech-report.svg" alt="Tech Report: PDF" width="140" height="20">
     </a>
@@ -16,6 +17,8 @@
     <strong>English</strong> | <a href="README_zh.md">简体中文</a>
   </p>
 </div>
+
+> 🚀🚀 **We are happy to announce the release of MemT-1.0-Pro [MemT × NVIDIA]!**
 
 ## **Overview**
 
@@ -37,6 +40,7 @@ The project makes three main contributions:
 | ----------------------------------------------------------------- | -------------------------- | ---------------- | -------------------- | --------------------------- | -------------------- |
 | [MemT-1.0-Nano](https://huggingface.co/MemTensor/MemT-1.0-Nano)   | Qwen3.6-35B-A3B            | 36B              | 3B                   | 451M                        | 10M                  |
 | [MemT-1.0-Flash](https://huggingface.co/MemTensor/MemT-1.0-Flash) | DeepSeek-V4-Flash          | 288B             | 17B                  | 3.61B                       | 336M                 |
+| [MemT-1.0-Pro](https://huggingface.co/MemTensor/MemT-1.0-Pro)     | NVIDIA-Nemotron-3-Ultra-550B-A55B | 554B     | 59B                  | 4.23B                       | 13M                  |
 
 ### Architecture
 
@@ -52,7 +56,7 @@ During generation, memory attention reads from the current memory state, normali
 
 ### Evaluation Results
 
-Across 11 memory benchmarks, MemT-1.0-Flash and MemT-1.0-Nano rank first and second among the **evaluated parametric-memory methods**, respectively. Strong textual-memory systems remain ahead overall, particularly on long histories that require detailed evidence retrieval.
+Across 11 memory benchmarks, MemT-1.0-Pro, MemT-1.0-Flash, and MemT-1.0-Nano rank first, second, and third among the **evaluated parametric-memory methods**, respectively. Strong textual-memory systems remain ahead overall, particularly on long histories that require detailed evidence retrieval.
 
 ![MemT-1.0 memory benchmark results](assets/figure_performance.png)
 
@@ -64,7 +68,7 @@ MemT-1.0 introduces an agentic framework for reusing procedural experience in lo
 
 ## **Quick Start**
 
-The examples below serve MemT-1.0-Nano with SGLang and use the `memt_sglang` Python client for conversations with native memory. For deployment details and MemT-1.0-Flash setup, see the inference guide in [English](inference/README.md) or [简体中文](inference/README_zh.md).
+The examples below serve MemT-1.0-Nano with SGLang and use the `memt_sglang` Python client for conversations with native memory. For deployment details and MemT-1.0-Flash / Pro setup, see the inference guide in [English](inference/README.md) or [简体中文](inference/README_zh.md).
 
 ### Installation
 

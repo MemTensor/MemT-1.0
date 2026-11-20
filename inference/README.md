@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | MemT-1.0-Nano | Qwen3.6-35B-A3B | 2 GPUs, TP2 / EP1 / DP1 | [start_memt_nano.sh](start_memt_nano.sh) |
 | MemT-1.0-Flash | DeepSeek-V4-Flash | 8 GPUs, TP8 / EP8 / DP8, attention TP1 | [start_memt_flash.sh](start_memt_flash.sh) |
+| MemT-1.0-Pro | NVIDIA Nemotron-3-Ultra-550B-A55B | 8 GPUs, TP8 / EP8 / DP1 | [start_memt_pro.sh](start_memt_pro.sh) |
 
 The scripts provide one runnable starting configuration. They have not been deeply optimized; adjust parallelism, token budgets and concurrency for your hardware and workload. The Nano backbone's HF configuration identifier is `qwen3_5_moe`.
 
@@ -72,9 +73,10 @@ Use a complete local MemT checkpoint directory containing matching BF16 safetens
 ```bash
 sh start_memt_nano.sh /models/MemT-1.0-Nano
 sh start_memt_flash.sh /models/MemT-1.0-Flash
+sh start_memt_pro.sh /models/MemT-1.0-Pro
 ```
 
-Run one command for the model you intend to serve. Both scripts call `python -m memt_sglang.launch`, default to `127.0.0.1:30000` and store memory snapshots in `./memt-state`. Extra launcher arguments are appended, for example:
+Run one command for the model you intend to serve. The scripts call `python -m memt_sglang.launch`, default to `127.0.0.1:30000` and store memory snapshots in `./memt-state`. Extra launcher arguments are appended, for example:
 
 ```bash
 sh start_memt_flash.sh /models/MemT-1.0-Flash \
@@ -83,27 +85,27 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 
 ### Example script settings
 
-| Setting | Nano | Flash |
-| --- | --- | --- |
-| `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` |
-| TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 |
-| Sessions per rank / in-flight commits per rank | 6 / 2 | 6 / 1 |
-| Minimum KV tokens | 2048 | 2048 |
-| Maximum prefill tokens | 16384 | 16384 |
-| Maximum total tokens / running requests | 65536 / 8 | 65536 / 48 |
-| Static memory fraction | 0.60 | 0.70 |
-| Weight dtype | BF16 | BF16 |
-| KV cache | Engine default | `fp8_e4m3` |
-| Context length | Engine/config default | 16384 |
-| Attention / linear-attention backend | Triton / Triton | Engine default |
-| MoE / sampling backend | Triton / PyTorch | Triton / PyTorch |
-| Retained streaming sessions | Disabled | Enabled |
+| Setting | Nano | Flash | Pro |
+| --- | --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` | `0,1,2,3,4,5,6,7` |
+| TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 | 8 / 8 / 1 |
+| Sessions per rank / in-flight commits per rank | 6 / 2 | 6 / 1 | 6 / 2 |
+| Minimum KV tokens | 2048 | 2048 | 2048 |
+| Maximum prefill tokens | 16384 | 16384 | 16384 |
+| Maximum total tokens / running requests | 65536 / 8 | 65536 / 48 | 65536 / 8 |
+| Static memory fraction | 0.60 | 0.70 | 0.70 |
+| Weight dtype | BF16 | BF16 | BF16 |
+| KV cache | Engine default | `fp8_e4m3` | BF16 |
+| Context length | Engine/config default | 16384 | 16384 |
+| Attention / linear-attention backend | Triton / Triton | Engine default | `flashinfer` / engine default |
+| MoE / sampling backend | Triton / PyTorch | Triton / PyTorch | Triton / PyTorch |
+| Retained streaming sessions | Disabled | Enabled | Enabled |
 
-Both scripts use explicit memory/KV budgets for single-node BF16 serving. Slot reads and CUDA Graphs are opt-in; see [Recommended configuration](#recommended-configuration). These values are deployment examples; extra native SGLang arguments remain subject to startup validation.
+The scripts use explicit memory/KV budgets for single-node BF16 serving. Slot reads and CUDA Graphs are opt-in; see [Recommended configuration](#recommended-configuration). The Pro script mirrors the Nano/Flash starting configuration; adjust context, budgets and concurrency for your hardware and workload. These values are deployment examples; extra native SGLang arguments remain subject to startup validation.
 
 ### Launcher arguments
 
-The launcher identifies the model (Nano or Flash) from the top-level `model_type` in `config.json` and validates its model-specific fields. There is no separate server-side model flag.
+The launcher identifies the model (Nano, Flash or Pro) from the top-level `model_type` in `config.json` and validates its model-specific fields. There is no separate server-side model flag.
 
 | Argument | Meaning |
 | --- | --- |
@@ -126,7 +128,7 @@ Dry-run does not validate SGLang arguments. Normal startup validates the actual 
 
 Serving requires single-node unquantized BF16 safetensors. Chunked prefill (`--chunked-prefill-size -1`) and overlap are disabled by default; radix cache must remain disabled. Compatible prefill/decode shapes may use CUDA Graph replay; incompatible shapes use eager execution. `max_prefill_tokens` must be at least the checkpoint's `memt.chunk_tokens`.
 
-Nano requires DP attention to be disabled. Flash enables DP attention and requires `tp_size == dp_size`, giving attention TP1. The launcher rejects `trust_remote_code`, `--config` merging and request header overrides. Additional unsupported execution modes are listed in [validation.py](memt_sglang/validation.py).
+Nano and Pro require DP attention to be disabled. Flash enables DP attention and requires `tp_size == dp_size`, giving attention TP1. The launcher rejects `trust_remote_code`, `--config` merging and request header overrides. Additional unsupported execution modes are listed in [validation.py](memt_sglang/validation.py).
 
 ### Environment variables
 
@@ -206,11 +208,11 @@ accuracy number produced with the graph enabled.
 The graph also requires a breakable decode backend with overlap scheduling off;
 the launcher rejects incompatible combinations before any worker starts.
 
-The launcher sets internal worker variables for the model (Nano or Flash), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
+The launcher sets internal worker variables for the model (Nano, Flash or Pro), configuration identity and snapshot storage, together with the SGLang model package path and required kernel settings. These are managed by the launcher rather than supplied as deployment options.
 
 ## Python client
 
-Use a local Nano or Flash checkpoint matching the server. Load the tokenizer with `AutoTokenizer` for text/token conversion, then call `load_chat_format(..., tokenizer=tokenizer)` to get `chat_format` for formatting messages and `parser` for interpreting model output, including reasoning and tool calls. Pass both to `MemTSession` and call `chat()` to converse.
+Use a local Nano, Flash or Pro checkpoint matching the server. Load the tokenizer with `AutoTokenizer` for text/token conversion, then call `load_chat_format(..., tokenizer=tokenizer)` to get `chat_format` for formatting messages and `parser` for interpreting model output, including reasoning and tool calls. Pass both to `MemTSession` and call `chat()` to converse.
 
 Memory reading is enabled by default. `enable_memory=True` saves unsaved past and current turns to latent local memory after the reply completes, then clears their plaintext conversation context. This also works on the first turn; disable reading separately with `set_memory_read(False)`.
 
@@ -363,7 +365,7 @@ with MemTSession(client, chat_format, parser) as document_session:
     )
 ```
 
-Memory write events use the checkpoint's `memt.chunk_tokens` (2048 in both released models), advertised as `chunk_tokens` by the server. This is the internal write-event size, not the maximum length of a commit request.
+Memory write events use the checkpoint's `memt.chunk_tokens` (2048 in Nano, Flash and Pro), advertised as `chunk_tokens` by the server. This is the internal write-event size, not the maximum length of a commit request.
 
 Each complete Q&A is submitted in one prefill and keeps its read snapshot and native context across internal write events. Its encoded length must fit the server's `max_prefill_tokens`. `ingest(document)` first commits any pending complete history, then submits the document as separate `chunk_tokens` chunks in the same transaction, advancing the read snapshot and resetting native context between document chunks. Successful ingestion clears local history.
 
@@ -417,7 +419,7 @@ Use `--url URL` for another server and `--enable-memory` to commit unsaved past 
 
 | Route | Purpose |
 | --- | --- |
-| `GET /memt/identity` | Model (`memt-nano` or `memt-flash`), configuration SHA-256, optional checkpoint ID, SGLang version and effective `memt_runtime`. |
+| `GET /memt/identity` | Model (`memt-nano`, `memt-flash` or `memt-pro`), configuration SHA-256, optional checkpoint ID, SGLang version and effective `memt_runtime`. |
 | `GET /memt/capabilities` | Protocol `memt-http-v1`, server epoch, snapshot format `memt-memory-v1`, `chunk_tokens`, `max_prefill_tokens`, streaming format and KV-retention support. |
 | `POST /memt/control` | Sessions, leases, transactions and snapshots. |
 | `POST /generate` with a MemT RID | Query or commit tokens to session memory. |
@@ -510,8 +512,7 @@ The checkpoint's `config.json` identifies the model:
 | --- | --- | --- | --- |
 | MemT-1.0-Nano | `memt_qwen3_5_moe` | `["MemTQwen3_5MoeForCausalLM"]` | `MemTQwen3_5MoeConfig` |
 | MemT-1.0-Flash | `memt_deepseek_v4` | `["MemTDeepseekV4ForCausalLM"]` | `MemTDeepseekV4Config` |
-
-Nano stores the backbone in `backbone_configs` with `model_type: "qwen3_5_moe"` and a nested `text_config`. Flash uses a flat HF configuration and must not contain `backbone_configs`. Both store memory parameters in `memt`. Sizes are read from `config.json`; validation pins only the fields that select the memory algorithm and the unquantized BF16 serving path, and loading checks the memory geometry against the native attention layers. `memt_checkpoint_id` is optional; Nano requires a nonempty string when it is present. The serving identity always includes the exact `config.json` SHA-256.
+| MemT-1.0-Pro | `memt_nemotron_h` | `["MemTNemotronHForCausalLM"]` | `MemTNemotronHConfig` |
 
 The optional top-level `memt_runtime` contains only `max_sessions_per_rank`, `max_inflight_commits_per_rank` and `min_kv_tokens`, all positive integers. The launcher merges defaults, checkpoint values, JSON runtime overrides and explicit capacity arguments in that order. Without overrides, each field defaults to 1; the supplied scripts set the deployment values shown above.
 
@@ -529,7 +530,7 @@ Original package code is licensed under the [PolyForm Noncommercial License 1.0.
 
 | Component | License |
 | --- | --- |
-| MemT SGLang integration, client and Nano / Flash memory implementations | [PolyForm Noncommercial 1.0.0](LICENSE) |
+| MemT SGLang integration, client and Nano / Flash / Pro memory implementations | [PolyForm Noncommercial 1.0.0](LICENSE) |
 | Flash memory kernels adapted from flash-linear-attention (`memt_sglang/models/deepseek/ops/_triton/intra.py`, `wy.py`) | Original FLA code: [MIT](memt_sglang/_vendor/fla/FLA_LICENSE); MemT modifications: [PolyForm Noncommercial 1.0.0](LICENSE). |
 | Vendored flash-linear-attention 0.5.2 subset (`memt_sglang/_vendor/fla`) | [MIT](memt_sglang/_vendor/fla/FLA_LICENSE), copyright 2023–2026 Songlin Yang, Yu Zhang and Zhiyuan Li. |
 

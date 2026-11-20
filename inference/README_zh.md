@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | MemT-1.0-Nano | Qwen3.6-35B-A3B | 2 张 GPU，TP2 / EP1 / DP1 | [start_memt_nano.sh](start_memt_nano.sh) |
 | MemT-1.0-Flash | DeepSeek-V4-Flash | 8 张 GPU，TP8 / EP8 / DP8，attention TP1 | [start_memt_flash.sh](start_memt_flash.sh) |
+| MemT-1.0-Pro | NVIDIA Nemotron-3-Ultra-550B-A55B | 8 张 GPU，TP8 / EP8 / DP1 | [start_memt_pro.sh](start_memt_pro.sh) |
 
 这些脚本提供可运行的起始配置，尚未经过深入优化；请根据硬件和工作负载调整并行方式、token 预算和并发数。Nano 骨干的 HF 配置标识为 `qwen3_5_moe`。
 
@@ -68,9 +69,10 @@ python tools/apply_sglang_patch.py /path/to/sglang stable-topk dsv4-numerics --a
 ```bash
 sh start_memt_nano.sh /models/MemT-1.0-Nano
 sh start_memt_flash.sh /models/MemT-1.0-Flash
+sh start_memt_pro.sh /models/MemT-1.0-Pro
 ```
 
-按需要服务的模型运行其中一条命令。两个脚本均调用 `python -m memt_sglang.launch`，默认监听 `127.0.0.1:30000`，记忆快照保存在 `./memt-state`。额外的 launcher 参数追加到命令末尾，例如：
+按需要服务的模型运行其中一条命令。三个脚本均调用 `python -m memt_sglang.launch`，默认监听 `127.0.0.1:30000`，记忆快照保存在 `./memt-state`。额外的 launcher 参数追加到命令末尾，例如：
 
 ```bash
 sh start_memt_flash.sh /models/MemT-1.0-Flash \
@@ -79,27 +81,27 @@ sh start_memt_flash.sh /models/MemT-1.0-Flash \
 
 ### 脚本配置示例
 
-| 配置项 | Nano | Flash |
-| --- | --- | --- |
-| `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` |
-| TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 |
-| 每 rank 会话数 / 并发提交数 | 6 / 2 | 6 / 1 |
-| 最小 KV token 数 | 2048 | 2048 |
-| 最大 prefill token 数 | 16384 | 16384 |
-| 最大总 token 数 / 运行请求数 | 65536 / 8 | 65536 / 48 |
-| 静态显存比例 | 0.60 | 0.70 |
-| 权重 dtype | BF16 | BF16 |
-| KV cache | 引擎默认值 | `fp8_e4m3` |
-| 上下文长度 | 引擎／配置默认值 | 16384 |
-| Attention / linear-attention 后端 | Triton / Triton | 引擎默认值 |
-| MoE / sampling 后端 | Triton / PyTorch | Triton / PyTorch |
-| 保留流式会话 KV | 关闭 | 开启 |
+| 配置项 | Nano | Flash | Pro |
+| --- | --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | `0,1` | `0,1,2,3,4,5,6,7` | `0,1,2,3,4,5,6,7` |
+| TP / EP / DP | 2 / 1 / 1 | 8 / 8 / 8 | 8 / 8 / 1 |
+| 每 rank 会话数 / 并发提交数 | 6 / 2 | 6 / 1 | 6 / 2 |
+| 最小 KV token 数 | 2048 | 2048 | 2048 |
+| 最大 prefill token 数 | 16384 | 16384 | 16384 |
+| 最大总 token 数 / 运行请求数 | 65536 / 8 | 65536 / 48 | 65536 / 8 |
+| 静态显存比例 | 0.60 | 0.70 | 0.70 |
+| 权重 dtype | BF16 | BF16 | BF16 |
+| KV cache | 引擎默认值 | `fp8_e4m3` | BF16 |
+| 上下文长度 | 引擎／配置默认值 | 16384 | 16384 |
+| Attention / linear-attention 后端 | Triton / Triton | 引擎默认值 | `flashinfer` / 引擎默认值 |
+| MoE / sampling 后端 | Triton / PyTorch | Triton / PyTorch | Triton / PyTorch |
+| 保留流式会话 KV | 关闭 | 开启 | 开启 |
 
-两个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。Slot read 与 CUDA Graph 需显式开启，见[推荐配置](#推荐配置)。这些值是部署示例，额外的 SGLang 原生参数仍须通过启动校验。
+三个脚本均显式设置记忆和 KV 预算，用于单节点 BF16 服务。Slot read 与 CUDA Graph 需显式开启，见[推荐配置](#推荐配置)。Pro 脚本沿用 Nano／Flash 的起始配置，用户可按硬件和工作负载调整上下文、预算与并发。这些值是部署示例，额外的 SGLang 原生参数仍须通过启动校验。
 
 ### Launcher 参数
 
-Launcher 根据 `config.json` 顶层的 `model_type` 识别模型（Nano 或 Flash），并校验对应模型的配置字段。服务端不另设模型参数。
+Launcher 根据 `config.json` 顶层的 `model_type` 识别模型（Nano、Flash 或 Pro），并校验对应模型的配置字段。服务端不另设模型参数。
 
 | 参数 | 含义 |
 | --- | --- |
@@ -122,7 +124,7 @@ Dry-run 不校验 SGLang 参数。正常启动会在 SGLang 完成参数解析�
 
 服务使用单节点未量化的 BF16 safetensors 权重。默认关闭 chunked prefill（`--chunked-prefill-size -1`）与 overlap，radix cache 必须关闭；兼容的 prefill/decode shape 可以使用 CUDA Graph，不兼容时使用 eager 路径。`max_prefill_tokens` 不得小于 checkpoint 的 `memt.chunk_tokens`。
 
-Nano 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size == dp_size`，使 attention TP 为 1。Launcher 拒绝 `trust_remote_code`、`--config` 配置合并和 request header overrides。其他不支持的执行模式见 [validation.py](memt_sglang/validation.py)。
+Nano 和 Pro 必须关闭 DP attention。Flash 开启 DP attention，并要求 `tp_size == dp_size`，使 attention TP 为 1。Launcher 拒绝 `trust_remote_code`、`--config` 配置合并和 request header overrides。其他不支持的执行模式见 [validation.py](memt_sglang/validation.py)。
 
 ### 环境变量
 
@@ -198,11 +200,11 @@ stable C4 是**选择策略**，不是实现细节。两次都标称开启了 me
 该图还要求 decode 后端为 breakable 且关闭 overlap 调度；不兼容组合会在任何 worker 启动前
 被启动器拒绝。
 
-Launcher 会设置向 worker 传递模型（Nano 或 Flash）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
+Launcher 会设置向 worker 传递模型（Nano、Flash 或 Pro）、配置身份和快照目录的内部变量，以及 SGLang 模型包路径和必要的内核设置。这些变量由 launcher 管理，不作为部署配置项。
 
 ## Python 客户端
 
-使用与服务端匹配的本地 Nano 或 Flash checkpoint。通过 `AutoTokenizer` 加载负责文本与 token 转换的 tokenizer，再调用 `load_chat_format(..., tokenizer=tokenizer)`，得到负责消息格式化的 `chat_format` 和负责解析模型输出、Thinking 及工具调用的 `parser`。将二者传入 `MemTSession`，通过 `chat()` 对话。
+使用与服务端匹配的本地 Nano、Flash 或 Pro checkpoint。通过 `AutoTokenizer` 加载负责文本与 token 转换的 tokenizer，再调用 `load_chat_format(..., tokenizer=tokenizer)`，得到负责消息格式化的 `chat_format` 和负责解析模型输出、Thinking 及工具调用的 `parser`。将二者传入 `MemTSession`，通过 `chat()` 对话。
 
 记忆读取默认开启。`enable_memory=True` 会在当前回答完成后，将尚未保存的历史及当前逻辑轮写入潜在局部记忆，并清除这些轮次的推理明文上下文；首轮即可使用。需要关闭读取时，单独调用 `set_memory_read(False)`。
 
@@ -354,7 +356,7 @@ with MemTSession(client, chat_format, parser) as document_session:
     )
 ```
 
-记忆写入事件使用 checkpoint 的 `memt.chunk_tokens`，两个已发布模型均为 2048，服务端通过 `chunk_tokens` 字段公布该值。它表示内部写入事件的大小，不是单次 commit 请求的最大长度。
+记忆写入事件使用 checkpoint 的 `memt.chunk_tokens`，Nano、Flash 和 Pro 均为 2048，服务端通过 `chunk_tokens` 字段公布该值。它表示内部写入事件的大小，不是单次 commit 请求的最大长度。
 
 每轮完整问答在一次 prefill 中提交，跨内部写入事件时保留相同的读取快照和原生上下文；编码后的长度必须不超过服务端的 `max_prefill_tokens`。`ingest(document)` 先提交尚未写入的完整历史，再在同一事务中将文档按 `chunk_tokens` 分块提交；文档块之间推进读取快照并重置原生上下文。写入成功后清空本地历史。
 
@@ -408,7 +410,7 @@ python -m memt_sglang.client --tokenizer /models/MemT-1.0-Flash \
 
 | 路由 | 用途 |
 | --- | --- |
-| `GET /memt/identity` | 模型（`memt-nano` 或 `memt-flash`）、配置 SHA-256、可选 checkpoint ID、SGLang 版本和生效的 `memt_runtime`。 |
+| `GET /memt/identity` | 模型（`memt-nano`、`memt-flash` 或 `memt-pro`）、配置 SHA-256、可选 checkpoint ID、SGLang 版本和生效的 `memt_runtime`。 |
 | `GET /memt/capabilities` | 协议 `memt-http-v1`、服务 epoch、快照格式 `memt-memory-v1`、`chunk_tokens`、`max_prefill_tokens`、流式格式和 KV 保留支持。 |
 | `POST /memt/control` | 会话、租约、事务和快照。 |
 | 带 MemT RID 的 `POST /generate` | 提问，或将 token 提交到会话记忆。 |
@@ -501,8 +503,7 @@ Checkpoint 的 `config.json` 用以下字段标识模型：
 | --- | --- | --- | --- |
 | MemT-1.0-Nano | `memt_qwen3_5_moe` | `["MemTQwen3_5MoeForCausalLM"]` | `MemTQwen3_5MoeConfig` |
 | MemT-1.0-Flash | `memt_deepseek_v4` | `["MemTDeepseekV4ForCausalLM"]` | `MemTDeepseekV4Config` |
-
-Nano 将骨干配置放在 `backbone_configs` 中，使用 `model_type: "qwen3_5_moe"`，文本配置位于其嵌套的 `text_config`。Flash 使用扁平 HF 配置，不能包含 `backbone_configs`。两个模型的记忆参数均放在 `memt` 中。尺寸类参数直接从 `config.json` 读取；校验只固定选择记忆算法的字段和未量化 BF16 推理路径，加载时还会核对记忆维度与原生 attention 层是否一致。`memt_checkpoint_id` 为可选字段；Nano 在提供该字段时要求它是非空字符串。服务身份始终包含完整 `config.json` 的 SHA-256。
+| MemT-1.0-Pro | `memt_nemotron_h` | `["MemTNemotronHForCausalLM"]` | `MemTNemotronHConfig` |
 
 顶层可选的 `memt_runtime` 只包含 `max_sessions_per_rank`、`max_inflight_commits_per_rank` 和 `min_kv_tokens`，均为正整数。Launcher 按默认值、checkpoint 配置、JSON runtime 覆盖、显式容量参数的顺序合并配置。未覆盖时每个字段默认为 1；启动脚本使用前文表格中的部署值。
 
@@ -520,7 +521,7 @@ Nano 将骨干配置放在 `backbone_configs` 中，使用 `model_type: "qwen3_5
 
 | 组件 | 许可证 |
 | --- | --- |
-| MemT SGLang 集成、客户端以及 Nano / Flash 记忆实现 | [PolyForm Noncommercial 1.0.0](LICENSE) |
+| MemT SGLang 集成、客户端以及 Nano / Flash / Pro 记忆实现 | [PolyForm Noncommercial 1.0.0](LICENSE) |
 | 基于 flash-linear-attention 修改的 Flash 记忆 kernel（`memt_sglang/models/deepseek/ops/_triton/intra.py`、`wy.py`） | FLA 原始代码：[MIT](memt_sglang/_vendor/fla/FLA_LICENSE)；MemT 的修改部分：[PolyForm Noncommercial 1.0.0](LICENSE)。 |
 | 随包提供的 flash-linear-attention 0.5.2 源码子集（`memt_sglang/_vendor/fla`） | [MIT](memt_sglang/_vendor/fla/FLA_LICENSE)，版权归 2023–2026 Songlin Yang、Yu Zhang 和 Zhiyuan Li 所有。 |
 
